@@ -307,3 +307,113 @@ fn status_is_accurate_right_after_a_download() {
     let j = &alex.engine.status().journeys[0];
     assert!(j.on_this_computer && j.in_sync, "{j:?}");
 }
+
+#[test]
+fn emptying_a_save_folder_restores_instead_of_deleting_for_everyone() {
+    let store = MemoryStore::new();
+    let mut chris = Friend::new("Chris", &store);
+    let mut alex = Friend::new("Alex", &store);
+    let other = "save_ready walker one_401fe41c4c9041c6";
+    chris.play(STEM, "a");
+    chris.play(other, "b");
+    chris.sync();
+    alex.sync();
+    // Chris's folder gets wiped (reinstall, cleanup...).
+    for e in std::fs::read_dir(&chris.saves).unwrap() {
+        std::fs::remove_file(e.unwrap().path()).unwrap();
+    }
+    chris.sync();
+    chris.sync();
+    alex.sync();
+    assert_eq!(chris.read(STEM).as_deref(), Some("a"), "restored, not deleted");
+    assert_eq!(chris.read(other).as_deref(), Some("b"));
+    assert_eq!(alex.read(STEM).as_deref(), Some("a"));
+    assert_eq!(alex.read(other).as_deref(), Some("b"));
+}
+
+#[test]
+fn two_save_folders_on_one_mac_deleting_duplicates_does_not_delete_remotely() {
+    let store = MemoryStore::new();
+    let mut chris = Friend::new("Chris", &store);
+    chris.play(STEM, "a");
+    chris.sync();
+
+    let tmp = TempDir::new().unwrap();
+    let real = tmp.path().join("House House");
+    let unity = tmp.path().join("unity");
+    std::fs::create_dir_all(&real).unwrap();
+    std::fs::create_dir_all(&unity).unwrap();
+    let mut opts = EngineOptions::new("MacFriend", tmp.path().join("data"));
+    opts.save_dirs_override = Some(vec![real.clone(), unity.clone()]);
+    opts.stable_ms = 0;
+    opts.delete_confirm_ms = 0;
+    let mut mac = Engine::new(Arc::new(store.clone()), opts).unwrap();
+    mac.sync_once(false).unwrap();
+    assert!(real.join(format!("{STEM}.sav")).exists() && unity.join(format!("{STEM}.sav")).exists());
+
+    // The duplicate in the unused folder gets deleted.
+    for ext in [".sav", ".sav.bak"] {
+        std::fs::remove_file(unity.join(format!("{STEM}{ext}"))).unwrap();
+    }
+    mac.sync_once(false).unwrap();
+    mac.sync_once(false).unwrap();
+    chris.sync();
+    assert_eq!(chris.read(STEM).as_deref(), Some("a"), "journey must survive for everyone");
+    assert!(store.keys().iter().any(|k| k.starts_with("v1/journeys/")));
+}
+
+#[test]
+fn downloaded_files_keep_the_original_save_time() {
+    let store = MemoryStore::new();
+    let mut chris = Friend::new("Chris", &store);
+    let mut alex = Friend::new("Alex", &store);
+    chris.play_at(STEM, "v1", 3600);
+    chris.sync();
+    alex.sync();
+    let m = std::fs::metadata(alex.saves.join(format!("{STEM}.sav"))).unwrap().modified().unwrap();
+    let age = SystemTime::now().duration_since(m).unwrap().as_secs();
+    assert!((3500..3700).contains(&age), "mtime should be the save time, was {age}s ago");
+}
+
+#[test]
+fn walk_names_with_dots_sync() {
+    let store = MemoryStore::new();
+    let mut chris = Friend::new("Chris", &store);
+    let mut alex = Friend::new("Alex", &store);
+    let stem = "save_wait.. what_0123456789abcdef";
+    chris.play(stem, "dots");
+    chris.sync();
+    alex.sync();
+    assert_eq!(alex.read(stem).as_deref(), Some("dots"));
+}
+
+#[test]
+fn deleted_journeys_can_be_found_and_restored() {
+    use walkrelay_core::engine::list_deleted;
+    let store = MemoryStore::new();
+    let mut chris = Friend::new("Chris", &store);
+    chris.play(STEM, "v1");
+    chris.sync();
+    for ext in [".sav", ".sav.bak"] {
+        std::fs::remove_file(chris.saves.join(format!("{STEM}{ext}"))).unwrap();
+    }
+    chris.sync();
+    chris.sync();
+    let deleted = list_deleted(&store).unwrap();
+    assert_eq!(deleted, vec![(STEM.to_string(), "a nice view".to_string())]);
+    let v = &list_versions(&store, STEM).unwrap()[0];
+    restore_version(&store, STEM, &v.key, "Chris").unwrap();
+    chris.sync();
+    assert_eq!(chris.read(STEM).as_deref(), Some("v1"));
+    assert!(list_deleted(&store).unwrap().is_empty());
+}
+
+#[test]
+fn backup_only_journey_does_not_count_as_out_of_sync() {
+    let store = MemoryStore::new();
+    let mut chris = Friend::new("Chris", &store);
+    chris.play(STEM, "v1");
+    write(&chris.saves, "save_orphan_0123456789abcdef.sav.bak", "x", None);
+    chris.sync();
+    assert!(chris.engine.status().journeys.iter().all(|j| j.in_sync), "{:?}", chris.engine.status().journeys);
+}

@@ -127,15 +127,18 @@ impl R2Store {
     /// Write, read and delete a scratch object to prove the credentials work.
     pub fn check_access(&self) -> Result<()> {
         let key = format!("v1/_check/{}", crate::now_ms());
-        match self.put(&key, b"ok", Cond::IfNoneMatch)? {
-            PutOutcome::Ok { .. } => {}
-            PutOutcome::PreconditionFailed => {}
-        }
+        self.put(&key, b"ok", Cond::None)?;
         let got = self.get(&key)?.context("wrote a test file but could not read it back")?;
         if got.0 != b"ok" {
             return Err(anyhow!("read back the wrong data"));
         }
+        let listed = self.list("v1/_check/")?;
         self.delete(&key)?;
+        if !listed.iter().any(|o| o.key == key) {
+            return Err(anyhow!(
+                "the bucket can't be listed properly - make sure the endpoint is just https://<account-id>.r2.cloudflarestorage.com without the bucket name"
+            ));
+        }
         Ok(())
     }
 }

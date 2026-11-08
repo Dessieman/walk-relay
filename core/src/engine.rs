@@ -50,6 +50,8 @@ pub struct EngineOptions {
     pub local_backups_keep: usize,
     pub presence_fresh_ms: u64,
     pub presence_heartbeat_ms: u64,
+    /// Sync-state file name inside `data_dir` (one per group).
+    pub state_file: String,
 }
 
 impl EngineOptions {
@@ -66,6 +68,7 @@ impl EngineOptions {
             local_backups_keep: 100,
             presence_fresh_ms: 3 * 60_000,
             presence_heartbeat_ms: 60_000,
+            state_file: "state.json".into(),
         }
     }
 }
@@ -156,6 +159,57 @@ struct LocalJourney {
     hash: String,
     newest_mtime: u64,
     has_sav: bool,
+}
+
+#[derive(Clone, Copy, Default)]
+struct Guards {
+    mass_local_delete: bool,
+    mass_remote_delete: bool,
+}
+
+/// Write a journey's files all-or-nothing: every temp file first, then the
+/// renames, then remove files the new version doesn't have. Files get the
+/// remote save time as their mtime, so "which session is newer" stays true.
+fn write_journey(root: &Path, stem: &str, files: &Files, saved_at: u64) -> Result<()> {
+    let mut staged = Vec::new();
+    for (name, data) in files {
+        let path = root.join(name);
+        let mut tmp = path.as_os_str().to_owned();
+        tmp.push(TMP_SUFFIX);
+        let tmp = PathBuf::from(tmp);
+        let write = (|| -> Result<()> {
+            let mut f = std::fs::File::create(&tmp).with_context(|| format!("writing {}", tmp.display()))?;
+            std::io::Write::write_all(&mut f, data)?;
+            if saved_at > 0 {
+                let _ = f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_millis(saved_at));
+            }
+            f.sync_all()?;
+            Ok(())
+        })();
+        if let Err(e) = write {
+            let _ = std::fs::remove_file(&tmp);
+            for (t, _) in &staged {
+                let _ = std::fs::remove_file(t);
+            }
+            return Err(e);
+        }
+        staged.push((tmp, path));
+    }
+    for (i, (tmp, path)) in staged.iter().enumerate() {
+        if let Err(e) = std::fs::rename(tmp, path) {
+            for (t, _) in &staged[i..] {
+                let _ = std::fs::remove_file(t);
+            }
+            return Err(e).with_context(|| format!("replacing {} (is Big Walk open?)", path.display()));
+        }
+    }
+    for p in journey_files_on_disk(root, stem) {
+        let n = p.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
+        if !files.contains_key(&n) {
+            std::fs::remove_file(&p)?;
+        }
+    }
+    Ok(())
 }
 
 struct Remote {
@@ -273,7 +327,7 @@ fn sanitize(s: &str) -> String {
 impl Engine {
     pub fn new(store: Arc<dyn RemoteStore>, opts: EngineOptions) -> Result<Self> {
         std::fs::create_dir_all(&opts.data_dir)?;
-        let state = match std::fs::read(opts.data_dir.join("state.json")) {
+        let state = match std::fs::read(opts.data_dir.join(&opts.state_file)) {
             Ok(b) => serde_json::from_slice(&b).unwrap_or_default(),
             Err(_) => State::default(),
         };
@@ -308,7 +362,7 @@ impl Engine {
     }
 
     fn save_state(&self) -> Result<()> {
-        write_atomic(&self.opts.data_dir.join("state.json"), &serde_json::to_vec_pretty(&self.state)?)
+        write_atomic(&self.opts.data_dir.join(&self.opts.state_file), &serde_json::to_vec_pretty(&self.state)?)
     }
 
     /// One full sync pass. Call every ~30 s, and right after Big Walk exits.
@@ -350,10 +404,17 @@ impl Engine {
         }
 
         let roots = self.save_dirs();
+        let mut scans = Vec::new();
+        for root in &roots {
+            scans.push(scan(root)?);
+        }
+        let present_anywhere: BTreeSet<String> = scans.iter().flat_map(|m| m.keys().cloned()).collect();
+        let guards = self.deletion_guards(&roots, &scans, &remote, &present_anywhere);
+
         let mut hosting: Option<(u64, String)> = None;
         let mut local_union: BTreeMap<String, bool> = BTreeMap::new(); // stem -> in sync everywhere
-        for root in &roots {
-            let local = self.sync_root(root, &mut remote, game_running, &mut events)?;
+        for (root, local) in roots.iter().zip(scans) {
+            let local = self.sync_root(root, local, &present_anywhere, guards, &mut remote, game_running, &mut events)?;
             for (stem, mtime, in_sync) in local {
                 let e = local_union.entry(stem.clone()).or_insert(true);
                 *e &= in_sync;
@@ -445,17 +506,49 @@ impl Engine {
         Ok(())
     }
 
+    /// Deletions are only shared one journey at a time. If several journeys
+    /// vanish at once (a folder emptied, a reinstall, a wrong bucket), that's
+    /// treated as an accident: everything is restored instead of deleted.
+    fn deletion_guards(
+        &self,
+        roots: &[PathBuf],
+        scans: &[BTreeMap<String, LocalJourney>],
+        remote: &BTreeMap<String, String>,
+        present_anywhere: &BTreeSet<String>,
+    ) -> Guards {
+        let mut local_gone = BTreeSet::new();
+        let mut remote_gone = BTreeSet::new();
+        for (root, local) in roots.iter().zip(scans) {
+            let Some(st) = self.state.roots.get(&root.display().to_string()) else { continue };
+            for (stem, s) in st {
+                match (local.get(stem), remote.get(stem)) {
+                    (None, Some(r)) if *r == s.base_etag && !present_anywhere.contains(stem) => {
+                        local_gone.insert(stem.clone());
+                    }
+                    (Some(l), None) if l.hash == s.hash => {
+                        remote_gone.insert(stem.clone());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Guards { mass_local_delete: local_gone.len() > 1, mass_remote_delete: remote_gone.len() > 1 }
+    }
+
     /// Returns (stem, newest mtime, in sync) for each local journey.
+    #[allow(clippy::too_many_arguments)]
     fn sync_root(
         &mut self,
         root: &Path,
+        local: BTreeMap<String, LocalJourney>,
+        present_anywhere: &BTreeSet<String>,
+        guards: Guards,
         remote: &mut BTreeMap<String, String>,
         game_running: bool,
         events: &mut Vec<Event>,
     ) -> Result<Vec<(String, u64, bool)>> {
         let now = now_ms();
         let root_key = root.display().to_string();
-        let local = scan(root)?;
         let stable = if game_running { self.opts.stable_ms_while_running } else { self.opts.stable_ms };
         let known: Vec<String> = self.state.roots.get(&root_key).map(|m| m.keys().cloned().collect()).unwrap_or_default();
         let stems: BTreeSet<String> = local.keys().chain(remote.keys()).chain(known.iter()).cloned().collect();
@@ -470,7 +563,8 @@ impl Engine {
                     continue; // mid-write; look again next cycle
                 }
             }
-            let res = self.sync_journey(root, &root_key, &stem, l, r, s, game_running, remote, events);
+            let keep = guards.mass_local_delete || present_anywhere.contains(&stem);
+            let res = self.sync_journey(root, &root_key, &stem, l, r, s, game_running, keep, guards.mass_remote_delete, remote, events);
             if let Err(e) = res {
                 log::warn!("{stem}: {e:#}");
                 self.status.last_error = Some(format!("journey {}: {e:#}", display_name(&stem)));
@@ -482,6 +576,7 @@ impl Engine {
         let st = self.state.roots.get(&root_key);
         Ok(local
             .iter()
+            .filter(|(_, l)| l.has_sav)
             .map(|(stem, l)| {
                 let in_sync = st
                     .and_then(|m| m.get(stem))
@@ -501,6 +596,10 @@ impl Engine {
         r: Option<String>,
         s: Option<JState>,
         game_running: bool,
+        // Don't share a local deletion (journey still elsewhere on this machine, or many vanished at once).
+        keep_local_missing: bool,
+        // Don't apply a remote deletion (many vanished remotely at once).
+        keep_remote_missing: bool,
         remote: &mut BTreeMap<String, String>,
         events: &mut Vec<Event>,
     ) -> Result<()> {
@@ -517,7 +616,7 @@ impl Engine {
             }
             // We had it in sync, and it vanished remotely: someone deleted it.
             (Some(l), None, Some(s)) => {
-                if l.hash == s.hash {
+                if l.hash == s.hash && !keep_remote_missing {
                     if !game_running {
                         self.backup_local(root, stem)?;
                         for p in journey_files_on_disk(root, stem) {
@@ -540,7 +639,11 @@ impl Engine {
             }
             // We had it, now it's gone locally.
             (None, Some(r), Some(s)) => {
-                if r == s.base_etag {
+                if r == s.base_etag && keep_local_missing {
+                    if !game_running {
+                        self.download(root, root_key, stem, None, events)?;
+                    }
+                } else if r == s.base_etag {
                     let k = (root_key.to_string(), stem.to_string());
                     let first = *self.pending_delete.entry(k.clone()).or_insert_with(now_ms);
                     if !game_running && now_ms().saturating_sub(first) >= self.opts.delete_confirm_ms {
@@ -702,15 +805,17 @@ impl Engine {
     }
 
     fn write_remote(&mut self, root: &Path, root_key: &str, stem: &str, rem: Remote) -> Result<()> {
-        self.backup_local(root, stem)?;
-        for (name, data) in &rem.files {
-            write_atomic(&root.join(name), data)?;
-        }
-        for p in journey_files_on_disk(root, stem) {
-            let n = p.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
-            if !rem.files.contains_key(&n) {
-                std::fs::remove_file(&p)?;
+        let backup = self.backup_local(root, stem)?;
+        if let Err(e) = write_journey(root, stem, &rem.files, rem.manifest.saved_at) {
+            // Put the previous pair back so the folder never holds a mixed .sav/.bak.
+            if let Some(dir) = backup {
+                if let Ok(rd) = std::fs::read_dir(&dir) {
+                    for f in rd.flatten() {
+                        let _ = std::fs::copy(f.path(), root.join(f.file_name()));
+                    }
+                }
             }
+            return Err(e);
         }
         self.set_state(root_key, stem, Some(JState { base_etag: rem.etag, hash: rem.manifest.content_hash }));
         Ok(())
@@ -726,12 +831,15 @@ impl Engine {
                 m.remove(stem);
             }
         }
+        if let Err(e) = self.save_state() {
+            log::warn!("saving sync state: {e:#}");
+        }
     }
 
-    fn backup_local(&self, root: &Path, stem: &str) -> Result<()> {
+    fn backup_local(&self, root: &Path, stem: &str) -> Result<Option<PathBuf>> {
         let files = journey_files_on_disk(root, stem);
         if files.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
         let dir = self
             .opts
@@ -744,7 +852,7 @@ impl Engine {
                 std::fs::copy(&f, dir.join(n)).with_context(|| format!("backing up {}", f.display()))?;
             }
         }
-        Ok(())
+        Ok(Some(dir))
     }
 
     fn prune_local_backups(&self) {
@@ -799,6 +907,27 @@ pub fn list_versions(store: &dyn RemoteStore, stem: &str) -> Result<Vec<Version>
     }
     out.sort_by(|a, b| b.at.cmp(&a.at));
     Ok(out)
+}
+
+/// Journeys that were deleted but still have saved versions (stem, name), so
+/// they can be restored.
+pub fn list_deleted(store: &dyn RemoteStore) -> Result<Vec<(String, String)>> {
+    let current: BTreeSet<String> = store
+        .list(JOURNEYS)?
+        .into_iter()
+        .filter_map(|o| o.key.strip_prefix(JOURNEYS)?.strip_suffix(".zip").and_then(unhexs))
+        .collect();
+    let mut out = BTreeSet::new();
+    for prefix in [HISTORY, CONFLICTS] {
+        for o in store.list(prefix)? {
+            if let Some(stem) = o.key.strip_prefix(prefix).and_then(|k| k.split('/').next()).and_then(unhexs) {
+                if !current.contains(&stem) {
+                    out.insert(stem);
+                }
+            }
+        }
+    }
+    Ok(out.into_iter().map(|s| { let n = display_name(&s); (s, n) }).collect())
 }
 
 /// Make an earlier version the current one. Everyone picks it up on their

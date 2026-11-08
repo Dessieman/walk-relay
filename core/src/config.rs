@@ -43,10 +43,20 @@ impl GroupCode {
         Ok(code)
     }
 
+    /// Short stable id for this group's bucket (used to keep per-group sync state apart).
+    pub fn id(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let h = Sha256::digest(format!("{}|{}", self.endpoint.trim().trim_end_matches('/'), self.bucket.trim()).as_bytes());
+        hex::encode(&h[..8])
+    }
+
     pub fn validate(&self) -> Result<()> {
         let url = url::Url::parse(self.endpoint.trim()).context("Endpoint must be a URL")?;
         if url.scheme() != "https" && url.scheme() != "http" {
             bail!("Endpoint must start with https://");
+        }
+        if !matches!(url.path(), "" | "/") || url.query().is_some() {
+            bail!("The endpoint should be just https://<account-id>.r2.cloudflarestorage.com (without the bucket name or anything after it)");
         }
         if self.bucket.trim().is_empty() || self.key_id.trim().is_empty() || self.secret.trim().is_empty() {
             bail!("Bucket, access key ID and secret are all required");

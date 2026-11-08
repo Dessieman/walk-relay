@@ -115,6 +115,19 @@ async fn list_versions(shared: St<'_>, stem: String) -> Result<Vec<Version>, Str
     blocking(move || engine::list_versions(&R2Store::new(&group)?, &stem)).await
 }
 
+#[derive(Serialize)]
+struct DeletedJourney {
+    stem: String,
+    name: String,
+}
+
+#[tauri::command]
+async fn list_deleted(shared: St<'_>) -> Result<Vec<DeletedJourney>, String> {
+    let group = shared.config.lock().unwrap().as_ref().map(|c| c.group.clone()).ok_or("Not set up yet")?;
+    let list = blocking(move || engine::list_deleted(&R2Store::new(&group)?)).await?;
+    Ok(list.into_iter().map(|(stem, name)| DeletedJourney { stem, name }).collect())
+}
+
 #[tauri::command]
 async fn restore_version(shared: St<'_>, stem: String, key: String) -> Result<(), String> {
     let (group, player) = {
@@ -185,7 +198,7 @@ fn announce(app: &AppHandle, events: &[Event], game_running: bool) {
             Event::DeletedLocal { journey } | Event::DeletedRemote { journey } => notify(
                 app,
                 "Journey deleted",
-                &format!("“{journey}” was deleted. A backup is kept under Versions."),
+                &format!("“{journey}” was deleted. You can bring it back from Settings → Deleted journeys in Walk Relay."),
             ),
             Event::PeerStartedHosting { player, journey } => {
                 notify(app, &format!("{player} is hosting"), &format!("{player} is hosting “{journey}”. Hop in!"))
@@ -238,6 +251,7 @@ fn worker(app: AppHandle, shared: Arc<Shared>, rx: Receiver<Wake>) {
             if let Some(cfg) = shared.config.lock().unwrap().clone() {
                 let mut opts = EngineOptions::new(cfg.player_name.clone(), shared.data_dir.clone());
                 opts.extra_save_dirs = cfg.extra_save_dirs.clone();
+                opts.state_file = format!("state-{}.json", cfg.group.id());
                 match R2Store::new(&cfg.group).and_then(|s| Engine::new(Arc::new(s), opts)) {
                     Ok(e) => engine = Some(e),
                     Err(e) => shared.status.lock().unwrap().last_error = Some(format!("{e:#}")),
@@ -283,6 +297,9 @@ fn worker(app: AppHandle, shared: Arc<Shared>, rx: Receiver<Wake>) {
         match rx.recv_timeout(GAME_CHECK_EVERY) {
             Ok(Wake::SyncNow) => next_sync = Instant::now(),
             Ok(Wake::Reload) => {
+                if let Some(e) = engine.as_mut() {
+                    let _ = e.clear_presence();
+                }
                 engine = None;
                 *shared.status.lock().unwrap() = Status::default();
                 next_sync = Instant::now();
@@ -335,6 +352,7 @@ fn main() {
             create_group_code,
             get_group_code,
             list_versions,
+            list_deleted,
             restore_version,
             sync_now,
             open_save_folder,
@@ -371,9 +389,13 @@ fn main() {
                             }
                         }
                         "quit" => {
-                            if shared.wake.send(Wake::Quit).is_err() {
-                                app.exit(0);
-                            }
+                            let _ = shared.wake.send(Wake::Quit);
+                            // Don't wait forever on a stalled network.
+                            let h = app.clone();
+                            std::thread::spawn(move || {
+                                std::thread::sleep(Duration::from_secs(5));
+                                h.exit(0);
+                            });
                         }
                         _ => {}
                     }
@@ -402,6 +424,13 @@ fn main() {
                 let _ = window.hide();
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Walk Relay");
+        .build(tauri::generate_context!())
+        .expect("error while starting Walk Relay")
+        .run(|_app, _event| {
+            // Opening the app again from Finder/Launchpad shows the window.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = _event {
+                show_main(_app);
+            }
+        });
 }

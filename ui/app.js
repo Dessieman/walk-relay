@@ -82,6 +82,25 @@ $("show-code").addEventListener("click", async () => {
   $("my-code").value = code || "";
   $("my-code").hidden = !code;
 });
+$("load-deleted").addEventListener("click", async (e) => {
+  await busy(e.target, async () => {
+    try {
+      const list = await invoke("list_deleted");
+      $("deleted").replaceChildren(
+        ...(list.length
+          ? list.map((j) =>
+              el("li", {},
+                el("div", { class: "grow" }, el("div", { class: "title", title: j.stem }, j.name)),
+                el("button", { onclick: () => openVersions(j) }, "Versions")
+              )
+            )
+          : [el("li", { class: "muted" }, "Nothing deleted.")])
+      );
+    } catch (err) {
+      $("deleted").replaceChildren(el("li", { class: "msg err" }, String(err)));
+    }
+  });
+});
 $("leave").addEventListener("click", async () => {
   if (!confirm("Stop syncing on this computer? Your saves stay where they are.")) return;
   await invoke("leave_group");

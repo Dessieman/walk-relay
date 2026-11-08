@@ -60,7 +60,11 @@ pub fn unpack(bytes: &[u8]) -> Result<(Manifest, Files)> {
             manifest = Some(serde_json::from_slice(&data).context("bad manifest")?);
         } else {
             // Only ever plain journey file names; never paths.
-            if name.contains('/') || name.contains('\\') || name.contains("..") || crate::paths::journey_stem(&name).is_none() {
+            let single_component = {
+                let mut c = std::path::Path::new(&name).components();
+                matches!((c.next(), c.next()), (Some(std::path::Component::Normal(_)), None))
+            };
+            if name.contains('/') || name.contains('\\') || !single_component || crate::paths::journey_stem(&name).is_none() {
                 bail!("unexpected file {name:?} in journey bundle");
             }
             files.insert(name, data);
