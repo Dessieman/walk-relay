@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use crate::bundle::{self, Files, Manifest};
 use crate::paths::{self, display_name, journey_stem};
-use crate::store::{Cond, PutOutcome, RemoteStore};
+use crate::store::{Cond, CountingStore, OpCounter, PutOutcome, RemoteStore};
 use crate::now_ms;
 
 const JOURNEYS: &str = "v1/journeys/";
@@ -52,6 +52,8 @@ pub struct EngineOptions {
     pub presence_heartbeat_ms: u64,
     /// Sync-state file name inside `data_dir` (one per group).
     pub state_file: String,
+    /// Monthly operation-count file name inside `data_dir` (one per group).
+    pub usage_file: String,
 }
 
 impl EngineOptions {
@@ -69,6 +71,7 @@ impl EngineOptions {
             presence_fresh_ms: 3 * 60_000,
             presence_heartbeat_ms: 60_000,
             state_file: "state.json".into(),
+            usage_file: "usage.json".into(),
         }
     }
 }
@@ -87,6 +90,75 @@ pub enum Event {
     PeerStartedHosting { player: String, journey: String },
     /// You launched Big Walk while someone else is already hosting.
     PeerAlreadyHosting { player: String, journey: String },
+    /// The group has used most of Cloudflare R2's free monthly allowance.
+    /// Sent at most once per month per computer.
+    NearFreeLimit { percent: u32 },
+}
+
+/// Cloudflare R2 free tier, per month.
+pub const FREE_CLASS_A: u64 = 1_000_000;
+pub const FREE_CLASS_B: u64 = 10_000_000;
+/// Warn once the group passes this share of either allowance.
+pub const WARN_AT_PERCENT: u64 = 70;
+
+/// Bucket operations made by one computer in one calendar month (UTC).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Usage {
+    pub month: String,
+    pub class_a: u64,
+    pub class_b: u64,
+}
+
+/// The whole group's operations this month, as far as this computer knows.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct GroupUsage {
+    pub month: String,
+    pub class_a: u64,
+    pub class_b: u64,
+    pub free_class_a: u64,
+    pub free_class_b: u64,
+    /// Highest share of either free allowance used, in percent.
+    pub percent: u32,
+    pub near_limit: bool,
+}
+
+impl GroupUsage {
+    pub fn new(month: String, class_a: u64, class_b: u64) -> Self {
+        let pa = class_a.saturating_mul(100) / FREE_CLASS_A;
+        let pb = class_b.saturating_mul(100) / FREE_CLASS_B;
+        let percent = pa.max(pb);
+        Self {
+            month,
+            class_a,
+            class_b,
+            free_class_a: FREE_CLASS_A,
+            free_class_b: FREE_CLASS_B,
+            percent: percent.min(u32::MAX as u64) as u32,
+            near_limit: percent >= WARN_AT_PERCENT,
+        }
+    }
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct UsageFile {
+    #[serde(flatten)]
+    usage: Usage,
+    #[serde(default)]
+    warned_month: Option<String>,
+}
+
+/// "YYYY-MM" for a Unix time in milliseconds, in UTC.
+pub fn month_utc(ms: u64) -> String {
+    // Days since 1970-01-01 -> civil date (Howard Hinnant's algorithm).
+    let z = (ms / 86_400_000) as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
+    format!("{y:04}-{m:02}")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,6 +168,9 @@ pub struct Presence {
     /// Journey stem this player is currently hosting.
     pub hosting: Option<String>,
     pub updated_at: u64,
+    /// This player's bucket operations this month (missing from older versions).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -125,6 +200,7 @@ pub struct Status {
     pub last_error: Option<String>,
     pub journeys: Vec<JourneyStatus>,
     pub peers: Vec<PeerStatus>,
+    pub usage: GroupUsage,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -229,6 +305,10 @@ pub struct Engine {
     game_started_at: u64,
     last_presence: Option<(Presence, u64)>,
     peers: BTreeMap<String, Presence>,
+    /// Latest reported usage of every other player, fresh or not.
+    peer_usage: BTreeMap<String, Usage>,
+    counter: Arc<OpCounter>,
+    usage: UsageFile,
     status: Status,
 }
 
@@ -327,6 +407,13 @@ fn sanitize(s: &str) -> String {
 impl Engine {
     pub fn new(store: Arc<dyn RemoteStore>, opts: EngineOptions) -> Result<Self> {
         std::fs::create_dir_all(&opts.data_dir)?;
+        let counting = CountingStore::new(store);
+        let counter = counting.counter();
+        let store: Arc<dyn RemoteStore> = Arc::new(counting);
+        let usage = std::fs::read(opts.data_dir.join(&opts.usage_file))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default();
         let state = match std::fs::read(opts.data_dir.join(&opts.state_file)) {
             Ok(b) => serde_json::from_slice(&b).unwrap_or_default(),
             Err(_) => State::default(),
@@ -342,8 +429,49 @@ impl Engine {
             game_started_at: 0,
             last_presence: None,
             peers: BTreeMap::new(),
+            peer_usage: BTreeMap::new(),
+            counter,
+            usage,
             status,
         })
+    }
+
+    /// Add the operations counted since last time to this month's total.
+    fn fold_usage(&mut self, now: u64) {
+        let month = month_utc(now);
+        let (a, b) = self.counter.take();
+        let u = &mut self.usage.usage;
+        if u.month != month {
+            *u = Usage { month, class_a: 0, class_b: 0 };
+        }
+        u.class_a += a;
+        u.class_b += b;
+    }
+
+    fn group_usage(&self) -> GroupUsage {
+        let mine = &self.usage.usage;
+        let (mut a, mut b) = (mine.class_a, mine.class_b);
+        for u in self.peer_usage.values().filter(|u| u.month == mine.month) {
+            a += u.class_a;
+            b += u.class_b;
+        }
+        GroupUsage::new(mine.month.clone(), a, b)
+    }
+
+    /// Fold in the latest counts, refresh the status, warn once a month, and save.
+    fn update_usage(&mut self, now: u64, events: &mut Vec<Event>) {
+        self.fold_usage(now);
+        let g = self.group_usage();
+        if g.near_limit && self.usage.warned_month.as_deref() != Some(g.month.as_str()) {
+            self.usage.warned_month = Some(g.month.clone());
+            events.push(Event::NearFreeLimit { percent: g.percent });
+        }
+        self.status.usage = g;
+        if let Ok(bytes) = serde_json::to_vec_pretty(&self.usage) {
+            if let Err(e) = write_atomic(&self.opts.data_dir.join(&self.opts.usage_file), &bytes) {
+                log::warn!("saving usage: {e:#}");
+            }
+        }
     }
 
     pub fn status(&self) -> &Status {
@@ -386,11 +514,6 @@ impl Engine {
         let just_launched = game_running && !self.game_running_prev;
         if just_launched {
             self.game_started_at = now;
-            for p in self.peers.values() {
-                if let Some(h) = &p.hosting {
-                    events.push(Event::PeerAlreadyHosting { player: p.player.clone(), journey: display_name(h) });
-                }
-            }
         }
         self.game_running_prev = game_running;
 
@@ -426,11 +549,13 @@ impl Engine {
         let hosting = hosting.map(|(_, s)| s);
 
         // Presence: publish ours, read everyone else's.
+        self.fold_usage(now);
         let mine = Presence {
             player: self.opts.player.clone(),
             game_running,
             hosting: hosting.clone(),
             updated_at: now,
+            usage: Some(self.usage.usage.clone()),
         };
         let changed = self.last_presence.as_ref().map_or(true, |(p, at)| {
             p.game_running != mine.game_running || p.hosting != mine.hosting || now.saturating_sub(*at) >= self.opts.presence_heartbeat_ms
@@ -440,6 +565,17 @@ impl Engine {
             self.last_presence = Some((mine, now));
         }
         self.read_peers(now, &mut events)?;
+        if just_launched {
+            // Warn from this pass's presence, not the previous pass's (which can be
+            // minutes old when syncing at the idle pace).
+            for p in self.peers.values() {
+                if let Some(h) = &p.hosting {
+                    let journey = display_name(h);
+                    events.retain(|e| !matches!(e, Event::PeerStartedHosting { player, .. } if *player == p.player));
+                    events.push(Event::PeerAlreadyHosting { player: p.player.clone(), journey });
+                }
+            }
+        }
 
         // Status for the UI.
         let mut journeys = Vec::new();
@@ -469,6 +605,7 @@ impl Engine {
             .map(|p| PeerStatus { player: p.player.clone(), game_running: p.game_running, hosting: p.hosting.as_deref().map(display_name) })
             .collect();
 
+        self.update_usage(now, &mut events);
         self.save_state()?;
         self.prune_local_backups();
         Ok(events)
@@ -476,12 +613,16 @@ impl Engine {
 
     fn read_peers(&mut self, now: u64, events: &mut Vec<Event>) -> Result<()> {
         let mut fresh = BTreeMap::new();
+        let mut usage = BTreeMap::new();
         for o in self.store.list(PRESENCE)? {
             if o.key == presence_key(&self.opts.player) {
                 continue;
             }
             let Some((bytes, _)) = self.store.get(&o.key)? else { continue };
             let Ok(p) = serde_json::from_slice::<Presence>(&bytes) else { continue };
+            if let Some(u) = &p.usage {
+                usage.insert(p.player.clone(), u.clone());
+            }
             if now.saturating_sub(p.updated_at) <= self.opts.presence_fresh_ms && (p.game_running || p.hosting.is_some()) {
                 fresh.insert(p.player.clone(), p);
             }
@@ -495,12 +636,20 @@ impl Engine {
             }
         }
         self.peers = fresh;
+        self.peer_usage = usage;
         Ok(())
     }
 
     /// Tell everyone we're offline (call on quit).
     pub fn clear_presence(&mut self) -> Result<()> {
-        let p = Presence { player: self.opts.player.clone(), game_running: false, hosting: None, updated_at: now_ms() };
+        self.fold_usage(now_ms());
+        let p = Presence {
+            player: self.opts.player.clone(),
+            game_running: false,
+            hosting: None,
+            updated_at: now_ms(),
+            usage: Some(self.usage.usage.clone()),
+        };
         self.store.put(&presence_key(&self.opts.player), &serde_json::to_vec(&p)?, Cond::None)?;
         self.last_presence = Some((p, now_ms()));
         Ok(())

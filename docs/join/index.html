@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="robots" content="noindex" />
+  <meta name="referrer" content="no-referrer" />
+  <title>Walk Relay invite</title>
+  <!-- The group code lives after the # in this page's address. Browsers never
+       send that part to the web server; this page reads it locally and hands
+       it to the Walk Relay app. -->
+  <style>
+    :root { --bg:#f6f3ea; --card:#fffdf7; --ink:#1f2a24; --muted:#6b766f; --line:#e3ddcd; --accent:#2e7d5b; --accent-ink:#fff; --danger:#a33a2b; color-scheme: light dark; }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg:#141a17; --card:#1c2420; --ink:#e9eee9; --muted:#93a098; --line:#2c3731; --accent:#4fb386; --accent-ink:#0d1411; --danger:#e0786a; }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 32px 16px; background: var(--bg); color: var(--ink);
+           font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+    main { max-width: 520px; margin: 0 auto; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 22px; margin-bottom: 14px; }
+    h1 { font-size: 22px; margin: 0 0 6px; }
+    h2 { font-size: 15px; margin: 0 0 8px; }
+    p { margin: 0 0 12px; }
+    .muted { color: var(--muted); font-size: 13.5px; }
+    .btn { display: inline-block; padding: 11px 18px; border-radius: 10px; border: 1px solid var(--line);
+           background: var(--card); color: var(--ink); font: inherit; font-weight: 600; text-decoration: none; cursor: pointer; }
+    .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+    .row { display: flex; flex-wrap: wrap; gap: 10px; margin: 14px 0 4px; }
+    ol { margin: 0 0 12px; padding-left: 20px; }
+    li { margin-bottom: 4px; }
+    a { color: var(--accent); }
+    .err { color: var(--danger); }
+    #status { min-height: 1.4em; font-size: 13.5px; }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="card" id="invite" hidden>
+      <h1>You're invited to a Big Walk group</h1>
+      <p class="muted">Walk Relay keeps your group's Big Walk saves in sync, so anyone can host the next session.</p>
+      <div class="row">
+        <a class="btn primary" id="open" href="#">Open in Walk Relay</a>
+        <button class="btn" id="copy" type="button">Copy group code</button>
+      </div>
+      <p id="status" class="muted" role="status"></p>
+    </section>
+
+    <section class="card" id="install" hidden>
+      <h2>Don't have Walk Relay yet?</h2>
+      <ol>
+        <li><a href="https://github.com/Dessieman/walk-relay/releases/latest">Download it</a>: the <strong>.exe</strong> for Windows or the <strong>.dmg</strong> for Mac.</li>
+        <li>Install it and open it once.</li>
+        <li>Come back to this page and click <strong>Open in Walk Relay</strong>.</li>
+      </ol>
+      <p class="muted">If the button doesn't do anything, click <strong>Copy group code</strong> and paste it into Walk Relay's setup screen.</p>
+    </section>
+
+    <section class="card" id="broken" hidden>
+      <h1>This invite link is incomplete</h1>
+      <p>Part of the link got lost when it was copied. Ask your friend to send it again: in Walk Relay, <strong>Settings &amp; help → Copy invite for a friend</strong>.</p>
+    </section>
+
+    <p class="muted">Keep this link private. Anyone with it can reach your group's saves.</p>
+  </main>
+
+  <script>
+    (function () {
+      var raw = location.hash.replace(/^#/, "");
+      // Some chat apps mangle links; a bad "%" escape must not blank the page.
+      try { raw = decodeURIComponent(raw); } catch (e) {}
+      raw = raw.trim();
+      var m = raw.match(/WR1-[A-Za-z0-9_-]{20,}/);
+      if (!m) {
+        document.getElementById("broken").hidden = false;
+        return;
+      }
+      var code = m[0];
+      document.getElementById("invite").hidden = false;
+      document.getElementById("install").hidden = false;
+      var status = document.getElementById("status");
+      document.getElementById("open").href = "walkrelay://join#" + code;
+      document.getElementById("open").addEventListener("click", function () {
+        status.textContent = "Opening Walk Relay… If nothing happens, install it first (below).";
+      });
+      document.getElementById("copy").addEventListener("click", function () {
+        function done(ok) {
+          status.textContent = ok ? "Copied. Paste it into Walk Relay's setup screen." : "Couldn't copy automatically. Select this and copy it: " + code;
+        }
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(code).then(function () { done(true); }, function () { done(false); });
+        } else {
+          done(false);
+        }
+      });
+    })();
+  </script>
+</body>
+</html>

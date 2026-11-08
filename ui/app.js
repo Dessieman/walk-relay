@@ -32,6 +32,22 @@ async function busy(btn, fn) {
   try { return await fn(); } finally { btn.disabled = false; }
 }
 
+// Copy text, falling back to selecting a textarea if the clipboard API is unavailable.
+async function copyText(text, fallbackTextarea) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    if (!fallbackTextarea) return false;
+    fallbackTextarea.hidden = false;
+    fallbackTextarea.value = text;
+    fallbackTextarea.select();
+    try { return document.execCommand("copy"); } catch { return false; }
+  }
+}
+
+let lastState = null;
+
 // ---------------------------------------------------------------- setup
 
 $("join").addEventListener("click", (e) =>
@@ -59,6 +75,7 @@ $("create").addEventListener("click", (e) =>
       });
       setMsg("create-msg", "It works!", "ok");
       $("created-code").value = code;
+      $("created-invite").value = await invoke("invite_message", { code });
       $("created").hidden = false;
     } catch (err) {
       setMsg("create-msg", String(err), "err");
@@ -66,17 +83,72 @@ $("create").addEventListener("click", (e) =>
   })
 );
 
+$("copy-created").addEventListener("click", async () => {
+  const ok = await copyText($("created-invite").value, $("created-invite"));
+  setMsg("create-msg", ok ? "Invite copied. Paste it into a DM to your friends." : "Select the invite above and copy it.", ok ? "ok" : "");
+});
+
 $("use-created").addEventListener("click", () => {
   $("code").value = $("created-code").value;
   $("name").focus();
   window.scrollTo({ top: 0, behavior: "smooth" });
 });
 
+// ---------------------------------------------------------------- invites
+
+async function receiveInvite(code) {
+  if (!code) return;
+  const state = lastState || (await invoke("get_state"));
+  if (state.configured) {
+    if ((await invoke("get_group_code")) === code) return; // already in this group
+    if (!confirm("You opened an invite to a different Walk Relay group. Leave your current group and join this one? Your saves stay where they are.")) return;
+    await invoke("leave_group");
+  }
+  await refresh();
+  $("code").value = code;
+  $("invite-note").hidden = false;
+  $("name").focus();
+}
+
+window.__TAURI__.event.listen("invite", (e) => {
+  invoke("take_pending_invite"); // handled here, so don't handle it again on load
+  receiveInvite(e.payload);
+});
+invoke("take_pending_invite").then(receiveInvite);
+
 // ---------------------------------------------------------------- home
 
 $("sync-now").addEventListener("click", () => invoke("sync_now"));
 $("open-folder").addEventListener("click", () => invoke("open_save_folder").catch((e) => alert(e)));
 $("open-backups").addEventListener("click", () => invoke("open_backups_folder").catch((e) => alert(e)));
+$("copy-invite").addEventListener("click", async () => {
+  const code = await invoke("get_group_code");
+  if (!code) return;
+  const ok = await copyText(await invoke("invite_message", { code }), $("my-code"));
+  setMsg("invite-copied", ok ? "Invite copied. Send it to a friend privately." : "Select the invite above and copy it.", ok ? "ok" : "");
+});
+$("update-now").addEventListener("click", (e) =>
+  busy(e.target, async () => {
+    setMsg("update-msg", "Downloading the update…");
+    try {
+      await invoke("install_update"); // restarts the app on success
+    } catch (err) {
+      setMsg("update-msg", String(err), "err");
+    }
+  })
+);
+$("check-update").addEventListener("click", (e) =>
+  busy(e.target, async () => {
+    setMsg("check-msg", "Checking…");
+    try {
+      const u = await invoke("check_for_update");
+      setMsg("check-msg", u.available ? `Version ${u.available} is available. Use the Update now button at the top.` : "You're up to date.", "ok");
+      refresh();
+    } catch (err) {
+      setMsg("check-msg", String(err), "err");
+    }
+  })
+);
 $("show-code").addEventListener("click", async () => {
   const code = await invoke("get_group_code");
   $("my-code").value = code || "";
@@ -185,6 +257,30 @@ function renderHome(state) {
   );
   $("who").textContent = `Signed in as ${state.player_name}.`;
   $("version").textContent = `Walk Relay ${state.app_version}`;
+
+  // Updates
+  const up = state.update;
+  $("update-card").hidden = !up.available;
+  if (up.available) {
+    $("update-title").textContent = `Walk Relay ${up.available} is available`;
+    $("update-now").disabled = s.game_running;
+    $("update-sub").textContent = s.game_running
+      ? "Close Big Walk to update. Walk Relay never updates while you're playing."
+      : "Takes a few seconds; Walk Relay restarts by itself.";
+  }
+
+  // Cloudflare free allowance
+  const u = s.usage;
+  if (u && u.month) {
+    const fmt = (n) => n.toLocaleString();
+    $("usage-line").textContent =
+      `Cloudflare usage this month (whole group, estimated): ${fmt(u.class_a)} of ${fmt(u.free_class_a)} free writes, ` +
+      `${fmt(u.class_b)} of ${fmt(u.free_class_b)} free reads.`;
+    $("usage-card").hidden = !u.near_limit;
+    $("usage-sub").textContent =
+      `Your group has used about ${u.percent}% of Cloudflare R2's free monthly allowance. ` +
+      "Syncing carries on as normal; going over costs a few cents per extra million operations.";
+  }
 }
 
 // ---------------------------------------------------------------- versions
@@ -243,6 +339,7 @@ $("v-close").addEventListener("click", () => $("versions").close());
 async function refresh() {
   try {
     const state = await invoke("get_state");
+    lastState = state;
     $("setup").hidden = state.configured;
     $("home").hidden = !state.configured;
     if (state.configured) renderHome(state);

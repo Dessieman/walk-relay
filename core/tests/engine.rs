@@ -417,3 +417,92 @@ fn backup_only_journey_does_not_count_as_out_of_sync() {
     chris.sync();
     assert!(chris.engine.status().journeys.iter().all(|j| j.in_sync), "{:?}", chris.engine.status().journeys);
 }
+
+#[test]
+fn usage_is_counted_shared_and_summed_for_the_group() {
+    use walkrelay_core::engine::month_utc;
+    let store = MemoryStore::new();
+    let mut chris = Friend::new("Chris", &store);
+    let mut alex = Friend::new("Alex", &store);
+    chris.play(STEM, "v1");
+    chris.sync();
+    alex.sync();
+    chris.sync();
+    let mine = chris.engine.status().usage.clone();
+    assert_eq!(mine.month, month_utc(walkrelay_core::now_ms()));
+    assert!(mine.class_a > 0 && mine.class_b > 0, "{mine:?}");
+    assert!(!mine.near_limit);
+    // Chris's total includes Alex's reported operations too.
+    let alex_only = alex.engine.status().usage.clone();
+    assert!(mine.class_a > alex_only.class_a / 2, "{mine:?} vs {alex_only:?}");
+
+    // Counts survive a restart (same data dir).
+    let data = chris._tmp.path().join("data");
+    let before: serde_json::Value = serde_json::from_slice(&std::fs::read(data.join("usage.json")).unwrap()).unwrap();
+    assert!(before["class_a"].as_u64().unwrap() > 0);
+}
+
+#[test]
+fn near_limit_warns_once_per_month() {
+    use walkrelay_core::engine::month_utc;
+    let store = MemoryStore::new();
+    let mut alex = Friend::new("Alex", &store);
+    alex.sync();
+    // A friend reports heavy usage this month.
+    let heavy = serde_json::json!({
+        "player": "Heavy", "game_running": false, "hosting": null, "updated_at": 0,
+        "usage": { "month": month_utc(walkrelay_core::now_ms()), "class_a": 750_000, "class_b": 0 }
+    });
+    // An older client's presence (no usage field) must still be read.
+    let old = serde_json::json!({ "player": "Old", "game_running": false, "hosting": null, "updated_at": 0 });
+    use walkrelay_core::{Cond, RemoteStore};
+    store.put(&format!("v1/presence/{}.json", hex::encode("Heavy")), heavy.to_string().as_bytes(), Cond::None).unwrap();
+    store.put(&format!("v1/presence/{}.json", hex::encode("Old")), old.to_string().as_bytes(), Cond::None).unwrap();
+
+    let ev = alex.sync();
+    assert!(ev.iter().any(|e| matches!(e, Event::NearFreeLimit { percent } if *percent >= 75)), "{ev:?}");
+    let u = &alex.engine.status().usage;
+    assert!(u.near_limit && u.class_a >= 750_000, "{u:?}");
+    let ev = alex.sync();
+    assert!(!ev.iter().any(|e| matches!(e, Event::NearFreeLimit { .. })), "warned twice: {ev:?}");
+
+    // Last month's usage doesn't count.
+    let stale = serde_json::json!({
+        "player": "Heavy", "game_running": false, "hosting": null, "updated_at": 0,
+        "usage": { "month": "2000-01", "class_a": 999_999, "class_b": 0 }
+    });
+    store.put(&format!("v1/presence/{}.json", hex::encode("Heavy")), stale.to_string().as_bytes(), Cond::None).unwrap();
+    alex.sync();
+    assert!(!alex.engine.status().usage.near_limit);
+}
+
+#[test]
+fn month_is_computed_in_utc() {
+    use walkrelay_core::engine::month_utc;
+    assert_eq!(month_utc(0), "1970-01");
+    assert_eq!(month_utc(951_782_400_000), "2000-02"); // 2000-02-29
+    assert_eq!(month_utc(1_798_761_599_000), "2026-12"); // 2026-12-31 23:59:59
+    assert_eq!(month_utc(1_798_761_600_000), "2027-01");
+}
+
+#[test]
+fn launch_warning_uses_fresh_presence_even_after_an_idle_gap() {
+    let store = MemoryStore::new();
+    let mut chris = Friend::new("Chris", &store);
+    let mut alex = Friend::new("Alex", &store);
+    chris.play(STEM, "v1");
+    chris.sync();
+    alex.sync(); // Alex's last look: nobody playing
+
+    // While Alex's app is idle, Chris starts hosting.
+    chris.sync_running();
+    std::thread::sleep(Duration::from_millis(20));
+    chris.play(STEM, "v2");
+    chris.sync_running();
+
+    // Alex launches Big Walk: the very first pass must warn, exactly once.
+    let ev = alex.sync_running();
+    let warn = Event::PeerAlreadyHosting { player: "Chris".into(), journey: "a nice view".into() };
+    assert_eq!(ev.iter().filter(|e| **e == warn).count(), 1, "{ev:?}");
+    assert!(!ev.iter().any(|e| matches!(e, Event::PeerStartedHosting { .. })), "{ev:?}");
+}

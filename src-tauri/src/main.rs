@@ -4,19 +4,23 @@
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Manager, Wry};
+use tauri::{AppHandle, Emitter, Manager, Wry};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt as _};
+use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_opener::OpenerExt;
+use tauri_plugin_updater::UpdaterExt;
 use walkrelay_core::engine::{self, Status, Version};
-use walkrelay_core::{config, paths, AppConfig, Engine, EngineOptions, Event, GameDetector, GroupCode, R2Store};
+use walkrelay_core::{config, paths, schedule, AppConfig, Engine, EngineOptions, Event, GameDetector, GroupCode, R2Store};
 
-/// How often to do a full sync when nothing else is happening.
-const SYNC_EVERY: Duration = Duration::from_secs(30);
+/// First update check after launch, then this often.
+const FIRST_UPDATE_CHECK: Duration = Duration::from_secs(30);
+const UPDATE_CHECK_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 /// How often to check whether Big Walk has started or stopped.
 const GAME_CHECK_EVERY: Duration = Duration::from_secs(4);
 /// After Big Walk closes, wait this long for its final save, then sync.
@@ -34,6 +38,25 @@ struct Shared {
     status: Mutex<Status>,
     wake: Sender<Wake>,
     tray_status: Mutex<Option<MenuItem<Wry>>>,
+    /// Group code from an invite link the UI hasn't picked up yet.
+    pending_invite: Mutex<Option<String>>,
+    update: Mutex<UpdateState>,
+    /// Set while installing an update: the worker stops syncing.
+    updating: AtomicBool,
+    /// True while the worker is in the middle of a sync.
+    syncing: AtomicBool,
+}
+
+#[derive(Serialize, Clone, Default)]
+struct UpdateState {
+    /// Newer version on GitHub, if any.
+    available: Option<String>,
+    notes: Option<String>,
+    checked_at: Option<u64>,
+    error: Option<String>,
+    /// Version we've already sent a notification about.
+    #[serde(skip)]
+    notified: Option<String>,
 }
 
 type St<'a> = tauri::State<'a, Arc<Shared>>;
@@ -47,6 +70,7 @@ struct UiState {
     status: Status,
     candidate_dirs: Vec<String>,
     app_version: String,
+    update: UpdateState,
 }
 
 #[tauri::command]
@@ -58,6 +82,7 @@ fn get_state(app: AppHandle, shared: St<'_>) -> UiState {
         status: shared.status.lock().unwrap().clone(),
         candidate_dirs: paths::candidate_save_dirs().iter().map(|p| p.display().to_string()).collect(),
         app_version: app.package_info().version.to_string(),
+        update: shared.update.lock().unwrap().clone(),
     }
 }
 
@@ -74,6 +99,8 @@ async fn join_group(app: AppHandle, shared: St<'_>, code: String, name: String) 
     if name.is_empty() || name.len() > 32 {
         return Err("Pick a name between 1 and 32 characters, so friends know who's hosting.".into());
     }
+    // Accept a pasted invite link or message, not only the bare code.
+    let code = config::code_from_invite(&code).unwrap_or(code);
     let group = GroupCode::decode(&code).map_err(|e| format!("{e:#}"))?;
     let g2 = group.clone();
     blocking(move || R2Store::new(&g2)?.check_access()).await.map_err(|e| format!("Couldn't reach your group's storage: {e}"))?;
@@ -107,6 +134,59 @@ async fn create_group_code(endpoint: String, bucket: String, key_id: String, sec
 #[tauri::command]
 fn get_group_code(shared: St<'_>) -> Option<String> {
     shared.config.lock().unwrap().as_ref().map(|c| c.group.encode())
+}
+
+/// The friendly message to send friends, with the clickable invite link.
+#[tauri::command]
+fn invite_message(code: String) -> Result<String, String> {
+    let code = config::code_from_invite(&code).ok_or("That group code doesn't look right")?;
+    Ok(format!(
+        "Join our Big Walk group on Walk Relay: {} (keep this private: it unlocks our shared saves)",
+        config::invite_link(&code)
+    ))
+}
+
+/// A group code from an invite link that opened the app, if the UI hasn't taken it yet.
+#[tauri::command]
+fn take_pending_invite(shared: St<'_>) -> Option<String> {
+    shared.pending_invite.lock().unwrap().take()
+}
+
+#[tauri::command]
+async fn check_for_update(app: AppHandle) -> Result<UpdateState, String> {
+    check_update(&app, false).await;
+    let shared = app.state::<Arc<Shared>>();
+    let st = shared.update.lock().unwrap().clone();
+    match &st.error {
+        Some(e) => Err(e.clone()),
+        None => Ok(st),
+    }
+}
+
+#[tauri::command]
+async fn install_update(app: AppHandle) -> Result<(), String> {
+    let shared = app.state::<Arc<Shared>>().inner().clone();
+    if GameDetector::new().is_running() {
+        return Err("Close Big Walk first. Walk Relay never updates while you're playing.".into());
+    }
+    let update = app
+        .updater()
+        .map_err(|e| e.to_string())?
+        .check()
+        .await
+        .map_err(|e| format!("Couldn't check for updates: {e}"))?
+        .ok_or("You're already on the latest version.")?;
+    // Let any sync in progress finish, and don't start another.
+    shared.updating.store(true, Ordering::SeqCst);
+    while shared.syncing.load(Ordering::SeqCst) {
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let result = update.download_and_install(|_, _| {}, || {}).await;
+    if let Err(e) = result {
+        shared.updating.store(false, Ordering::SeqCst);
+        return Err(format!("The update didn't install: {e}"));
+    }
+    app.restart();
 }
 
 #[tauri::command]
@@ -208,6 +288,13 @@ fn announce(app: &AppHandle, events: &[Event], game_running: bool) {
                 &format!("{player} is already hosting"),
                 &format!("{player} is hosting “{journey}” right now. Join them rather than hosting it too, or the journey will split in two."),
             ),
+            Event::NearFreeLimit { percent } => notify(
+                app,
+                "Cloudflare free allowance",
+                &format!(
+                    "Your group has used about {percent}% of Cloudflare R2's free monthly allowance. Syncing carries on; going over costs a few cents."
+                ),
+            ),
         }
     }
 }
@@ -242,6 +329,7 @@ fn worker(app: AppHandle, shared: Arc<Shared>, rx: Receiver<Wake>) {
     let mut engine: Option<Engine> = None;
     let mut detector = GameDetector::new();
     let mut prev_running = detector.is_running();
+    let mut last_exit: Option<Instant> = None;
     let mut next_sync = Instant::now();
     let mut last_tray = String::new();
 
@@ -252,6 +340,7 @@ fn worker(app: AppHandle, shared: Arc<Shared>, rx: Receiver<Wake>) {
                 let mut opts = EngineOptions::new(cfg.player_name.clone(), shared.data_dir.clone());
                 opts.extra_save_dirs = cfg.extra_save_dirs.clone();
                 opts.state_file = format!("state-{}.json", cfg.group.id());
+                opts.usage_file = format!("usage-{}.json", cfg.group.id());
                 match R2Store::new(&cfg.group).and_then(|s| Engine::new(Arc::new(s), opts)) {
                     Ok(e) => engine = Some(e),
                     Err(e) => shared.status.lock().unwrap().last_error = Some(format!("{e:#}")),
@@ -265,11 +354,12 @@ fn worker(app: AppHandle, shared: Arc<Shared>, rx: Receiver<Wake>) {
         }
         if !running && prev_running {
             next_sync = Instant::now() + AFTER_EXIT_DELAY;
+            last_exit = Some(Instant::now());
         }
         prev_running = running;
 
-        if Instant::now() >= next_sync {
-            next_sync = Instant::now() + SYNC_EVERY;
+        if Instant::now() >= next_sync && !shared.updating.load(Ordering::SeqCst) {
+            shared.syncing.store(true, Ordering::SeqCst);
             if let Some(e) = engine.as_mut() {
                 match e.sync_once(running) {
                     Ok(events) => announce(&app, &events, running),
@@ -277,6 +367,15 @@ fn worker(app: AppHandle, shared: Arc<Shared>, rx: Receiver<Wake>) {
                 }
                 *shared.status.lock().unwrap() = e.status().clone();
             }
+            shared.syncing.store(false, Ordering::SeqCst);
+            next_sync = Instant::now() + {
+                let st = shared.status.lock().unwrap();
+                let friend_playing = !st.peers.is_empty();
+                let all_in_sync = st.journeys.iter().filter(|j| j.on_this_computer).all(|j| j.in_sync);
+                // After a failed sync, retry at the active pace.
+                let ok = st.last_error.is_none();
+                schedule::sync_interval(running, friend_playing, last_exit.map(|t| t.elapsed()), all_in_sync && ok)
+            };
             // A save written just before exit may still have been settling; check again soon.
             if !running && engine.as_ref().map_or(false, |e| e.status().journeys.iter().any(|j| j.on_this_computer && !j.in_sync)) {
                 next_sync = next_sync.min(Instant::now() + Duration::from_secs(8));
@@ -319,10 +418,56 @@ fn worker(app: AppHandle, shared: Arc<Shared>, rx: Receiver<Wake>) {
 // ------------------------------------------------------------------ app
 
 fn show_main(app: &AppHandle) {
+    // Opening the window is a good moment to refresh.
+    if let Some(shared) = app.try_state::<Arc<Shared>>() {
+        let _ = shared.wake.send(Wake::SyncNow);
+    }
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
         let _ = w.unminimize();
         let _ = w.set_focus();
+    }
+}
+
+/// Handle an invite link (from a click, or from the command line).
+fn handle_links<I: IntoIterator<Item = String>>(app: &AppHandle, links: I) {
+    for link in links {
+        if let Some(code) = config::code_from_invite(&link) {
+            *app.state::<Arc<Shared>>().pending_invite.lock().unwrap() = Some(code.clone());
+            show_main(app);
+            let _ = app.emit("invite", code);
+        }
+    }
+}
+
+/// Look for a newer release; notify once per new version.
+async fn check_update(app: &AppHandle, notify_if_new: bool) {
+    let shared = app.state::<Arc<Shared>>().inner().clone();
+    let result = match app.updater() {
+        Ok(u) => u.check().await.map_err(|e| e.to_string()),
+        Err(e) => Err(e.to_string()),
+    };
+    let mut st = shared.update.lock().unwrap();
+    st.checked_at = Some(walkrelay_core::now_ms());
+    match result {
+        Ok(Some(u)) => {
+            st.error = None;
+            st.available = Some(u.version.clone());
+            st.notes = u.body.clone();
+            if notify_if_new && st.notified.as_deref() != Some(u.version.as_str()) {
+                st.notified = Some(u.version.clone());
+                notify(app, "Walk Relay update", &format!("Version {} is available. Open Walk Relay to update.", u.version));
+            }
+        }
+        Ok(None) => {
+            st.error = None;
+            st.available = None;
+            st.notes = None;
+        }
+        Err(e) => {
+            log::warn!("update check failed: {e}");
+            st.error = Some(format!("Couldn't check for updates: {e}"));
+        }
     }
 }
 
@@ -337,11 +482,22 @@ fn main() {
         status: Mutex::new(Status::default()),
         wake: tx,
         tray_status: Mutex::new(None),
+        pending_invite: Mutex::new(None),
+        update: Mutex::new(UpdateState::default()),
+        updating: AtomicBool::new(false),
+        syncing: AtomicBool::new(false),
     });
     let started_hidden = std::env::args().any(|a| a == "--minimized");
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
+        // Must be first: a second launch (e.g. clicking an invite link on Windows)
+        // hands its arguments to the running copy and exits.
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            show_main(app);
+            handle_links(app, args);
+        }))
+        .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, Some(vec!["--minimized"])))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
@@ -351,6 +507,10 @@ fn main() {
             join_group,
             create_group_code,
             get_group_code,
+            invite_message,
+            take_pending_invite,
+            check_for_update,
+            install_update,
             list_versions,
             list_deleted,
             restore_version,
@@ -410,6 +570,26 @@ fn main() {
             std::thread::Builder::new()
                 .name("walkrelay-sync".into())
                 .spawn(move || worker(handle, shared2, rx))?;
+
+            // Invite links: clicked while running (macOS), or the one that launched us.
+            let h = app.handle().clone();
+            app.deep_link().on_open_url(move |event| {
+                handle_links(&h, event.urls().into_iter().map(|u| u.to_string()));
+            });
+            if let Ok(Some(urls)) = app.deep_link().get_current() {
+                handle_links(app.handle(), urls.into_iter().map(|u| u.to_string()));
+            }
+            handle_links(app.handle(), std::env::args().skip(1));
+
+            // Check for updates shortly after launch, then daily.
+            let h = app.handle().clone();
+            std::thread::Builder::new().name("walkrelay-update".into()).spawn(move || {
+                std::thread::sleep(FIRST_UPDATE_CHECK);
+                loop {
+                    tauri::async_runtime::block_on(check_update(&h, true));
+                    std::thread::sleep(UPDATE_CHECK_EVERY);
+                }
+            })?;
 
             let configured = shared.config.lock().unwrap().is_some();
             if !configured || !started_hidden {
