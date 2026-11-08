@@ -26,6 +26,8 @@
   }
 }
 * { box-sizing: border-box; }
+/* Elements marked hidden stay hidden, whatever display rule they also match. */
+[hidden] { display: none !important; }
 body {
   margin: 0;
   padding: 16px;
