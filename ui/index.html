@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Walk Relay</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <img src="icon.png" alt="" width="36" height="36" />
+    <div>
+      <h1>Walk Relay</h1>
+      <p class="sub">Big Walk saves, shared, so anyone can host.</p>
+    </div>
+  </header>
+
+  <!-- ---------------- Setup ---------------- -->
+  <main id="setup" hidden>
+    <section class="card">
+      <h2>Join your group</h2>
+      <p>Paste the group code a friend sent you, and pick the name others will see.</p>
+      <label>Your name
+        <input id="name" maxlength="32" placeholder="e.g. Chris" autocomplete="off" />
+      </label>
+      <label>Group code
+        <textarea id="code" rows="3" placeholder="WR1-…" spellcheck="false"></textarea>
+      </label>
+      <button id="join" class="primary">Join and start syncing</button>
+      <p id="join-msg" class="msg" role="status"></p>
+    </section>
+
+    <details class="card">
+      <summary>First one here? Create the group code</summary>
+      <p>Do this once for the whole group. Make a free Cloudflare R2 bucket and an R2 API token with
+        <em>Object Read &amp; Write</em> for that bucket (the README walks through it), then paste the details below.</p>
+      <label>S3 endpoint
+        <input id="c-endpoint" placeholder="https://<account-id>.r2.cloudflarestorage.com" spellcheck="false" />
+      </label>
+      <label>Bucket name
+        <input id="c-bucket" placeholder="big-walk" spellcheck="false" />
+      </label>
+      <label>Access key ID
+        <input id="c-key" spellcheck="false" autocomplete="off" />
+      </label>
+      <label>Secret access key
+        <input id="c-secret" type="password" spellcheck="false" autocomplete="off" />
+      </label>
+      <button id="create">Test and create code</button>
+      <p id="create-msg" class="msg" role="status"></p>
+      <div id="created" hidden>
+        <p>Your group code. Send it to your friends privately (a DM, not a public channel):</p>
+        <textarea id="created-code" rows="3" readonly></textarea>
+        <button id="use-created" class="primary">Use this code for me too</button>
+      </div>
+    </details>
+  </main>
+
+  <!-- ---------------- Status ---------------- -->
+  <main id="home" hidden>
+    <section class="card status">
+      <div id="headline" class="headline">Starting…</div>
+      <div id="subline" class="subline"></div>
+      <div class="row">
+        <button id="sync-now">Sync now</button>
+        <button id="open-folder">Open save folder</button>
+      </div>
+    </section>
+
+    <section class="card" id="peers-card" hidden>
+      <h2>Friends online</h2>
+      <ul id="peers" class="list"></ul>
+    </section>
+
+    <section class="card">
+      <h2>Journeys</h2>
+      <ul id="journeys" class="list"><li class="muted">No journeys yet. Host one in Big Walk and it shows up here.</li></ul>
+    </section>
+
+    <details class="card">
+      <summary>Settings &amp; help</summary>
+      <p class="muted" id="who"></p>
+      <p><strong>How it works:</strong> just play. When the host closes Big Walk, the journey uploads, and everyone else's copy updates within about a minute, so anyone can host next time. Saves are never touched while Big Walk is open.</p>
+      <p><strong>Avoid:</strong> two people hosting the <em>same</em> journey at the same time. Walk Relay warns you, and if it happens anyway, it keeps both versions.</p>
+      <p class="muted">Save folders watched:</p>
+      <ul id="dirs" class="mono"></ul>
+      <div class="row wrap">
+        <button id="show-code">Show group code</button>
+        <button id="open-backups">Open local backups</button>
+        <button id="leave" class="danger">Leave group</button>
+      </div>
+      <textarea id="my-code" rows="3" readonly hidden></textarea>
+      <p class="muted small" id="version"></p>
+    </details>
+  </main>
+
+  <!-- ---------------- Versions dialog ---------------- -->
+  <dialog id="versions">
+    <h2 id="v-title">Versions</h2>
+    <p class="muted small">Restoring makes that version the current one for everyone (applied once their Big Walk is closed).</p>
+    <ul id="v-list" class="list"></ul>
+    <p id="v-msg" class="msg" role="status"></p>
+    <div class="row"><button id="v-close">Close</button></div>
+  </dialog>
+
+  <script src="app.js"></script>
+</body>
+</html>

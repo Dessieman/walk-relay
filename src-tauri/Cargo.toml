@@ -1,0 +1,21 @@
+[package]
+name = "walk-relay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Keeps your group's Big Walk saves in sync so anyone can host"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+walkrelay-core = { path = "../core" }
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-autostart = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-single-instance = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+log = "0.4"

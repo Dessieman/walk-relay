@@ -1,0 +1,52 @@
+name: Release
+
+# Run this from the Actions tab ("Run workflow"), or push a tag like v0.1.1.
+# It builds the Windows installer and the Mac app and attaches them to a GitHub Release.
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            platform: windows-latest
+            args: ""
+            targets: ""
+          - name: macOS (Apple silicon)
+            platform: macos-latest
+            args: "--target aarch64-apple-darwin"
+            targets: "aarch64-apple-darwin"
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.targets }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p walkrelay-core
+      - run: npm install
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: v__VERSION__
+          releaseName: "Walk Relay v__VERSION__"
+          releaseBody: |
+            **Windows:** download the `Walk.Relay_..._x64-setup.exe` below and run it.
+            **Mac:** download the `.dmg`, open it, and drag Walk Relay into Applications.
+            First-launch warnings are expected (the app isn't code-signed); see the README for the one-time steps.
+          releaseDraft: false
+          prerelease: false
+          args: ${{ matrix.args }}

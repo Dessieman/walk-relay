@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The Walk Relay window only talks to Walk Relay's own commands.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}
