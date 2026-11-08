@@ -514,11 +514,6 @@ impl Engine {
         let just_launched = game_running && !self.game_running_prev;
         if just_launched {
             self.game_started_at = now;
-            for p in self.peers.values() {
-                if let Some(h) = &p.hosting {
-                    events.push(Event::PeerAlreadyHosting { player: p.player.clone(), journey: display_name(h) });
-                }
-            }
         }
         self.game_running_prev = game_running;
 
@@ -570,6 +565,17 @@ impl Engine {
             self.last_presence = Some((mine, now));
         }
         self.read_peers(now, &mut events)?;
+        if just_launched {
+            // Warn from this pass's presence, not the previous pass's (which can be
+            // minutes old when syncing at the idle pace).
+            for p in self.peers.values() {
+                if let Some(h) = &p.hosting {
+                    let journey = display_name(h);
+                    events.retain(|e| !matches!(e, Event::PeerStartedHosting { player, .. } if *player == p.player));
+                    events.push(Event::PeerAlreadyHosting { player: p.player.clone(), journey });
+                }
+            }
+        }
 
         // Status for the UI.
         let mut journeys = Vec::new();

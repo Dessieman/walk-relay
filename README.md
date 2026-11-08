@@ -14,7 +14,7 @@ You don't press anything. Just play.
 
 1. Someone hosts a journey in Big Walk as usual.
 2. When they close Big Walk, Walk Relay uploads that journey.
-3. Within about a minute, everyone else's copy updates, even if their computer was just sitting there.
+3. Everyone else's copy updates within a few minutes (about a minute if they were in the session), even if their computer was just sitting there.
 4. Next time, whoever is around hosts. The journey continues exactly where it left off.
 
 Safety rules built in:

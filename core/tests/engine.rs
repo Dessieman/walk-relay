@@ -484,3 +484,25 @@ fn month_is_computed_in_utc() {
     assert_eq!(month_utc(1_798_761_599_000), "2026-12"); // 2026-12-31 23:59:59
     assert_eq!(month_utc(1_798_761_600_000), "2027-01");
 }
+
+#[test]
+fn launch_warning_uses_fresh_presence_even_after_an_idle_gap() {
+    let store = MemoryStore::new();
+    let mut chris = Friend::new("Chris", &store);
+    let mut alex = Friend::new("Alex", &store);
+    chris.play(STEM, "v1");
+    chris.sync();
+    alex.sync(); // Alex's last look: nobody playing
+
+    // While Alex's app is idle, Chris starts hosting.
+    chris.sync_running();
+    std::thread::sleep(Duration::from_millis(20));
+    chris.play(STEM, "v2");
+    chris.sync_running();
+
+    // Alex launches Big Walk: the very first pass must warn, exactly once.
+    let ev = alex.sync_running();
+    let warn = Event::PeerAlreadyHosting { player: "Chris".into(), journey: "a nice view".into() };
+    assert_eq!(ev.iter().filter(|e| **e == warn).count(), 1, "{ev:?}");
+    assert!(!ev.iter().any(|e| matches!(e, Event::PeerStartedHosting { .. })), "{ev:?}");
+}

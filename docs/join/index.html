@@ -66,7 +66,10 @@
 
   <script>
     (function () {
-      var raw = decodeURIComponent(location.hash.replace(/^#/, "")).trim();
+      var raw = location.hash.replace(/^#/, "");
+      // Some chat apps mangle links; a bad "%" escape must not blank the page.
+      try { raw = decodeURIComponent(raw); } catch (e) {}
+      raw = raw.trim();
       var m = raw.match(/WR1-[A-Za-z0-9_-]{20,}/);
       if (!m) {
         document.getElementById("broken").hidden = false;
