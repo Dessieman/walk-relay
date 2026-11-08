@@ -19,12 +19,13 @@
   <main id="setup" hidden>
     <section class="card">
       <h2>Join your group</h2>
-      <p>Paste the group code a friend sent you, and pick the name others will see.</p>
+      <p>Click the invite link a friend sent you, or paste it (or the group code) below, and pick the name others will see.</p>
+      <p id="invite-note" class="msg ok" hidden>Invite received. Just add your name.</p>
       <label>Your name
         <input id="name" maxlength="32" placeholder="e.g. Chris" autocomplete="off" />
       </label>
       <label>Group code
-        <textarea id="code" rows="3" placeholder="WR1-…" spellcheck="false"></textarea>
+        <textarea id="code" rows="3" placeholder="Invite link or WR1-… code" spellcheck="false"></textarea>
       </label>
       <button id="join" class="primary">Join and start syncing</button>
       <p id="join-msg" class="msg" role="status"></p>
@@ -49,15 +50,37 @@
       <button id="create">Test and create code</button>
       <p id="create-msg" class="msg" role="status"></p>
       <div id="created" hidden>
-        <p>Your group code. Send it to your friends privately (a DM, not a public channel):</p>
-        <textarea id="created-code" rows="3" readonly></textarea>
-        <button id="use-created" class="primary">Use this code for me too</button>
+        <p>Send this invite to your friends privately (a DM, not a public channel). They click the link and Walk Relay fills in everything.</p>
+        <textarea id="created-invite" rows="3" readonly></textarea>
+        <div class="row wrap">
+          <button id="copy-created" class="primary">Copy invite</button>
+          <button id="use-created">Use this group for me too</button>
+        </div>
+        <details class="small"><summary>Show the raw group code</summary>
+          <textarea id="created-code" rows="3" readonly></textarea>
+        </details>
       </div>
     </details>
   </main>
 
   <!-- ---------------- Status ---------------- -->
   <main id="home" hidden>
+    <section class="card notice" id="update-card" hidden>
+      <div class="grow">
+        <strong id="update-title">Update available</strong>
+        <div class="meta" id="update-sub">Takes a few seconds; Walk Relay restarts by itself.</div>
+      </div>
+      <button id="update-now" class="primary">Update now</button>
+    </section>
+    <p id="update-msg" class="msg" role="status"></p>
+
+    <section class="card notice warn" id="usage-card" hidden>
+      <div class="grow">
+        <strong>Close to Cloudflare's free allowance</strong>
+        <div class="meta" id="usage-sub"></div>
+      </div>
+    </section>
+
     <section class="card status">
       <div id="headline" class="headline">Starting…</div>
       <div id="subline" class="subline"></div>
@@ -86,13 +109,20 @@
       <ul id="dirs" class="mono"></ul>
       <p class="muted">Deleted journeys</p>
       <ul id="deleted" class="list"><li class="muted"><button id="load-deleted">Show deleted journeys</button></li></ul>
+      <p class="muted small" id="usage-line"></p>
       <div class="row wrap">
+        <button id="copy-invite" class="primary">Copy invite for a friend</button>
         <button id="show-code">Show group code</button>
         <button id="open-backups">Open local backups</button>
         <button id="leave" class="danger">Leave group</button>
       </div>
       <textarea id="my-code" rows="3" readonly hidden></textarea>
-      <p class="muted small" id="version"></p>
+      <p id="invite-copied" class="msg" role="status"></p>
+      <div class="row wrap">
+        <button id="check-update">Check for updates</button>
+        <span class="muted small" id="version"></span>
+      </div>
+      <p id="check-msg" class="msg" role="status"></p>
     </details>
   </main>
 

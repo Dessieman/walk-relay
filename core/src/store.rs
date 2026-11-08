@@ -7,6 +7,7 @@
 use anyhow::{anyhow, Context, Result};
 use rusty_s3::{actions::ListObjectsV2, Bucket, Credentials, S3Action, UrlStyle};
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -46,6 +47,60 @@ pub trait RemoteStore: Send + Sync {
 
 fn normalize_etag(e: &str) -> String {
     e.trim().trim_start_matches("W/").trim_matches('"').to_string()
+}
+
+// ---------------------------------------------------------------- op counting
+
+/// Running count of billable bucket operations, in Cloudflare R2's terms:
+/// Class A = list / put / delete (1M free per month), Class B = get (10M free).
+#[derive(Debug, Default)]
+pub struct OpCounter {
+    class_a: AtomicU64,
+    class_b: AtomicU64,
+}
+
+impl OpCounter {
+    /// Return the counts since the last call and reset them to zero.
+    pub fn take(&self) -> (u64, u64) {
+        (self.class_a.swap(0, Ordering::Relaxed), self.class_b.swap(0, Ordering::Relaxed))
+    }
+}
+
+/// Wraps any store and counts the operations made through it.
+pub struct CountingStore {
+    inner: Arc<dyn RemoteStore>,
+    counter: Arc<OpCounter>,
+}
+
+impl CountingStore {
+    pub fn new(inner: Arc<dyn RemoteStore>) -> Self {
+        Self { inner, counter: Arc::new(OpCounter::default()) }
+    }
+    pub fn counter(&self) -> Arc<OpCounter> {
+        self.counter.clone()
+    }
+}
+
+impl RemoteStore for CountingStore {
+    fn list(&self, prefix: &str) -> Result<Vec<ObjInfo>> {
+        let r = self.inner.list(prefix);
+        // One request per page of up to 1000 keys.
+        let pages = r.as_ref().map_or(1, |v| 1 + v.len() as u64 / 1000);
+        self.counter.class_a.fetch_add(pages, Ordering::Relaxed);
+        r
+    }
+    fn get(&self, key: &str) -> Result<Option<(Vec<u8>, String)>> {
+        self.counter.class_b.fetch_add(1, Ordering::Relaxed);
+        self.inner.get(key)
+    }
+    fn put(&self, key: &str, data: &[u8], cond: Cond) -> Result<PutOutcome> {
+        self.counter.class_a.fetch_add(1, Ordering::Relaxed);
+        self.inner.put(key, data, cond)
+    }
+    fn delete(&self, key: &str) -> Result<()> {
+        self.counter.class_a.fetch_add(1, Ordering::Relaxed);
+        self.inner.delete(key)
+    }
 }
 
 // ---------------------------------------------------------------- in-memory
@@ -241,6 +296,18 @@ impl RemoteStore for R2Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn counting_store_counts_class_a_and_b() {
+        let s = CountingStore::new(Arc::new(MemoryStore::new()));
+        s.put("a", b"1", Cond::None).unwrap();
+        s.get("a").unwrap();
+        s.get("missing").unwrap();
+        s.list("").unwrap();
+        s.delete("a").unwrap();
+        assert_eq!(s.counter().take(), (3, 2));
+        assert_eq!(s.counter().take(), (0, 0));
+    }
 
     #[test]
     fn memory_store_conditional_semantics() {

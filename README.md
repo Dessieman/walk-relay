@@ -39,7 +39,7 @@ Download the latest release from this repo's **Releases** page.
    xattr -cr "/Applications/Walk Relay.app"
    ```
 
-When it opens, enter **your name** and paste the **group code**. That's it. Walk Relay now starts with your computer and lives in the system tray (Windows) or the menu bar (Mac). Closing the window keeps it running.
+When it opens, click the **invite link** a friend sent you (or paste it into the setup screen) and enter **your name**. That's it. Walk Relay now starts with your computer and lives in the system tray (Windows) or the menu bar (Mac). Closing the window keeps it running.
 
 ## One-time setup (one person does this)
 
@@ -55,9 +55,27 @@ The group needs one small storage bucket. Cloudflare R2's free tier is plenty: a
    - **Secret Access Key**
    - the **S3 endpoint**: `https://<your-account-id>.r2.cloudflarestorage.com`
 5. Install Walk Relay. On the setup screen, open **"First one here? Create the group code"**, paste the values plus the bucket name, and click **Test and create code**.
-6. Send the resulting `WR1-…` group code to your friends **privately**. It grants access to the bucket. Click **Use this code for me too** to join yourself.
+6. Click **Copy invite** and send it to your friends **privately** (a DM, not a public channel). It's a link they click to join, and it grants access to the bucket. Then click **Use this group for me too** to join yourself.
 
-Lost the code? Any member can see it again under **Settings & help → Show group code**.
+Need to invite someone later? Any member can click **Settings & help → Copy invite for a friend**.
+
+The invite link opens a small page in this repo ([`docs/join/`](docs/join/index.html), served by GitHub Pages). The group code sits after the `#` in the link, and browsers never send that part to the web server. The page just hands the code to the Walk Relay app, or offers the download if you don't have it yet.
+
+## Staying in Cloudflare's free tier
+
+R2 has no spending cap, so Walk Relay keeps its own usage low:
+
+- It checks the bucket every **30 seconds** while you or a friend are playing, and for 10 minutes after a session. Otherwise it checks every **5 minutes**. A small group stays far below the free allowance.
+- It counts its bucket operations, and each member shares their count with the group. **Settings & help** shows the group's estimated usage this month.
+- If the group passes **70%** of the free monthly allowance, everyone gets a notification and a notice in the window. Syncing carries on; going over costs a few cents per extra million operations.
+
+For extra peace of mind, set a **billing budget alert** in Cloudflare (**Notifications → Billing budget alert**) at $1.
+
+## Updates
+
+Walk Relay checks for a new version when it starts and once a day. When one is out, you get a notification and an **Update now** button at the top of the window. It installs in a few seconds and restarts itself. It never updates while Big Walk is open. You can also click **Settings & help → Check for updates**.
+
+(Version 0.1.0 had no updater, so anyone on it needs to install 0.2.0 by hand once.)
 
 ## Tips
 
@@ -99,6 +117,8 @@ npm install && npx tauri dev          # run the app locally
 
 Remote layout in the bucket (`v1/`): `journeys/<hex stem>.zip` holds the current version of each journey (the `.sav` and `.sav.bak` plus a manifest). `history/` and `conflicts/` hold earlier and set-aside versions. `presence/<hex name>.json` records who is playing or hosting.
 
-**Releases:** in GitHub, open **Actions → Release → Run workflow**. That builds the Windows installer and the Mac app and publishes them as a release tagged with the version in `src-tauri/tauri.conf.json`. Bump that version and the workspace version in `Cargo.toml` for each new release.
+**Releases:** in GitHub, open **Actions → Release → Run workflow**. That builds the Windows installer and the Mac app and publishes them as a release tagged with the version in `src-tauri/tauri.conf.json`. Bump that version, the workspace version in `Cargo.toml` and `package.json` for each new release.
+
+Releases are signed for the in-app updater. The workflow needs the repository secrets `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, and the matching public key is in `tauri.conf.json` (`plugins.updater.pubkey`). The release also publishes `latest.json`, which installed copies check for updates. **Keep a backup of the private key**: without it, installed copies can't be updated automatically, and everyone would have to reinstall by hand.
 
 There's also a headless CLI: `walkrelay-cli make-code | check | sync`.

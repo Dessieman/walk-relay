@@ -6,6 +6,32 @@ use std::path::{Path, PathBuf};
 
 const CODE_PREFIX: &str = "WR1-";
 
+/// Web page that turns an invite link into "open Walk Relay". The group code
+/// travels in the `#fragment`, which browsers never send to the server.
+pub const INVITE_PAGE: &str = "https://dessieman.github.io/walk-relay/join/";
+/// Custom URL scheme the app registers, e.g. `walkrelay://join#WR1-...`.
+pub const URL_SCHEME: &str = "walkrelay";
+
+/// Pull a group code out of anything a friend might paste or click: the raw
+/// code, a `walkrelay://` link, the https invite link, or a whole invite
+/// message containing one of those. Returns the code only if it decodes.
+pub fn code_from_invite(text: &str) -> Option<String> {
+    let start = text.find(CODE_PREFIX)?;
+    let rest = &text[start..];
+    // A code is base64url after the prefix: stop at the first other character
+    // (a space, quote, bracket, or the end of a sentence).
+    let end = rest[CODE_PREFIX.len()..]
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+        .map_or(rest.len(), |i| i + CODE_PREFIX.len());
+    let code = &rest[..end];
+    GroupCode::decode(code).ok().map(|_| code.to_string())
+}
+
+/// The shareable https invite link for a group code.
+pub fn invite_link(code: &str) -> String {
+    format!("{INVITE_PAGE}#{code}")
+}
+
 /// Everything needed to reach the group's shared bucket. Shared between
 /// friends as a single copy-pasteable "group code".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,5 +148,28 @@ mod tests {
         let messy = format!("  {}\n{} ", &code[..10], &code[10..]);
         assert_eq!(GroupCode::decode(&messy).unwrap(), g);
         assert!(GroupCode::decode("hello").is_err());
+    }
+
+    #[test]
+    fn invite_links_and_messages_yield_the_code() {
+        let g = GroupCode {
+            endpoint: "https://abc.r2.cloudflarestorage.com".into(),
+            bucket: "big-walk".into(),
+            key_id: "KEY".into(),
+            secret: "SECRET".into(),
+            region: "auto".into(),
+        };
+        let code = g.encode();
+        let link = invite_link(&code);
+        assert_eq!(code_from_invite(&code).as_deref(), Some(code.as_str()));
+        assert_eq!(code_from_invite(&link).as_deref(), Some(code.as_str()));
+        assert_eq!(code_from_invite(&format!("walkrelay://join#{code}")).as_deref(), Some(code.as_str()));
+        assert_eq!(code_from_invite(&format!("walkrelay://join/#{code}/")).as_deref(), Some(code.as_str()));
+        let msg = format!("Join our Big Walk group on Walk Relay: {link} (keep this private)");
+        assert_eq!(code_from_invite(&msg).as_deref(), Some(code.as_str()));
+        assert_eq!(code_from_invite(&format!("<{link}>.")).as_deref(), Some(code.as_str()));
+        assert_eq!(code_from_invite("WR1-garbage"), None);
+        assert_eq!(code_from_invite("https://example.com/"), None);
+        assert_eq!(code_from_invite(""), None);
     }
 }

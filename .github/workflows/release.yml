@@ -40,6 +40,9 @@ jobs:
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Signs the update files that installed copies download (see README).
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: v__VERSION__
           releaseName: "Walk Relay v__VERSION__"
@@ -47,6 +50,7 @@ jobs:
             **Windows:** download the `Walk.Relay_..._x64-setup.exe` below and run it.
             **Mac:** download the `.dmg`, open it, and drag Walk Relay into Applications.
             First-launch warnings are expected (the app isn't code-signed); see the README for the one-time steps.
+            Already have Walk Relay 0.2.0 or newer? It updates itself: click **Update now** in the app.
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}

@@ -10,12 +10,13 @@ pub mod config;
 pub mod engine;
 pub mod game;
 pub mod paths;
+pub mod schedule;
 pub mod store;
 
 pub use config::{AppConfig, GroupCode};
-pub use engine::{Engine, EngineOptions, Event, Presence, Status, Version, VersionKind};
+pub use engine::{Engine, EngineOptions, Event, GroupUsage, Presence, Status, Usage, Version, VersionKind};
 pub use game::GameDetector;
-pub use store::{Cond, MemoryStore, ObjInfo, PutOutcome, R2Store, RemoteStore};
+pub use store::{Cond, CountingStore, MemoryStore, ObjInfo, OpCounter, PutOutcome, R2Store, RemoteStore};
 
 /// Milliseconds since the Unix epoch.
 pub fn now_ms() -> u64 {
