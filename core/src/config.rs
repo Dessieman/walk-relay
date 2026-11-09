@@ -4,7 +4,12 @@ use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+/// Original format: the group's settings as base64url JSON. Works for any S3 storage.
 const CODE_PREFIX: &str = "WR1-";
+/// Compact format for standard Cloudflare R2 groups: about a third of the length.
+const COMPACT_PREFIX: &str = "WR2-";
+const COMPACT_VERSION: u8 = 1;
+const R2_HOST_SUFFIX: &str = ".r2.cloudflarestorage.com";
 
 /// Web page that turns an invite link into "open Walk Relay". The group code
 /// travels in the `#fragment`, which browsers never send to the server.
@@ -16,15 +21,36 @@ pub const URL_SCHEME: &str = "walkrelay";
 /// code, a `walkrelay://` link, the https invite link, or a whole invite
 /// message containing one of those. Returns the code only if it decodes.
 pub fn code_from_invite(text: &str) -> Option<String> {
-    let start = text.find(CODE_PREFIX)?;
-    let rest = &text[start..];
-    // A code is base64url after the prefix: stop at the first other character
-    // (a space, quote, bracket, or the end of a sentence).
-    let end = rest[CODE_PREFIX.len()..]
-        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
-        .map_or(rest.len(), |i| i + CODE_PREFIX.len());
-    let code = &rest[..end];
-    GroupCode::decode(code).ok().map(|_| code.to_string())
+    for prefix in [COMPACT_PREFIX, CODE_PREFIX] {
+        let mut from = 0;
+        while let Some(i) = text[from..].find(prefix) {
+            let rest = &text[from + i..];
+            // A code is base64url after the prefix: stop at the first other character
+            // (a space, quote, bracket, or the end of a sentence).
+            let end = rest[prefix.len()..]
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+                .map_or(rest.len(), |j| j + prefix.len());
+            let code = &rest[..end];
+            if GroupCode::decode(code).is_ok() {
+                return Some(code.to_string());
+            }
+            from += i + prefix.len();
+        }
+    }
+    None
+}
+
+fn is_lower_hex(s: &str, len: usize) -> bool {
+    s.len() == len && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// The friendly message to paste in Discord: the link shows as clickable text
+/// (the `<...>` stops Discord from adding a large preview under it).
+pub fn discord_invite_message(code: &str) -> String {
+    format!(
+        "\u{1F97E} [Join our Big Walk group on Walk Relay](<{}>) (keep this private: it unlocks our shared saves)",
+        invite_link(code)
+    )
 }
 
 /// The shareable https invite link for a group code.
@@ -50,21 +76,58 @@ fn default_region() -> String {
 }
 
 impl GroupCode {
+    /// The shareable code: compact `WR2-` for standard R2 groups, `WR1-` otherwise.
     pub fn encode(&self) -> String {
+        if let Some(c) = self.encode_compact() {
+            return c;
+        }
         let json = serde_json::to_vec(self).expect("serializable");
         format!("{CODE_PREFIX}{}", URL_SAFE_NO_PAD.encode(json))
     }
 
+    /// `[version][16 B account id][16 B key id][32 B secret][bucket]`, if this
+    /// group has exactly the standard R2 shape (so decoding rebuilds it byte for byte).
+    fn encode_compact(&self) -> Option<String> {
+        let account = self.endpoint.strip_prefix("https://")?.strip_suffix(R2_HOST_SUFFIX)?;
+        if !is_lower_hex(account, 32)
+            || !is_lower_hex(&self.key_id, 32)
+            || !is_lower_hex(&self.secret, 64)
+            || self.region != "auto"
+            || self.bucket.is_empty()
+            || self.bucket.trim() != self.bucket
+        {
+            return None;
+        }
+        let mut raw = vec![COMPACT_VERSION];
+        raw.extend(hex::decode(account).ok()?);
+        raw.extend(hex::decode(&self.key_id).ok()?);
+        raw.extend(hex::decode(&self.secret).ok()?);
+        raw.extend(self.bucket.as_bytes());
+        Some(format!("{COMPACT_PREFIX}{}", URL_SAFE_NO_PAD.encode(raw)))
+    }
+
     pub fn decode(code: &str) -> Result<Self> {
         let cleaned: String = code.chars().filter(|c| !c.is_whitespace()).collect();
-        let body = cleaned
-            .strip_prefix(CODE_PREFIX)
-            .context("That doesn't look like a Walk Relay group code (it should start with WR1-)")?;
-        let json = URL_SAFE_NO_PAD
-            .decode(body.trim_end_matches('='))
-            .context("The group code is damaged - copy it again")?;
-        let code: GroupCode =
-            serde_json::from_slice(&json).context("The group code is damaged - copy it again")?;
+        let damaged = "The group code is damaged - copy it again";
+        let code = if let Some(body) = cleaned.strip_prefix(COMPACT_PREFIX) {
+            let raw = URL_SAFE_NO_PAD.decode(body.trim_end_matches('=')).context(damaged)?;
+            if raw.len() < 66 || raw[0] != COMPACT_VERSION {
+                bail!("{damaged}");
+            }
+            GroupCode {
+                endpoint: format!("https://{}{R2_HOST_SUFFIX}", hex::encode(&raw[1..17])),
+                key_id: hex::encode(&raw[17..33]),
+                secret: hex::encode(&raw[33..65]),
+                bucket: String::from_utf8(raw[65..].to_vec()).context(damaged)?,
+                region: "auto".into(),
+            }
+        } else {
+            let body = cleaned
+                .strip_prefix(CODE_PREFIX)
+                .context("That doesn't look like a Walk Relay group code (it should start with WR2- or WR1-)")?;
+            let json = URL_SAFE_NO_PAD.decode(body.trim_end_matches('=')).context(damaged)?;
+            serde_json::from_slice(&json).context(damaged)?
+        };
         code.validate()?;
         Ok(code)
     }
@@ -148,6 +211,56 @@ mod tests {
         let messy = format!("  {}\n{} ", &code[..10], &code[10..]);
         assert_eq!(GroupCode::decode(&messy).unwrap(), g);
         assert!(GroupCode::decode("hello").is_err());
+    }
+
+    fn r2_group() -> GroupCode {
+        GroupCode {
+            endpoint: "https://88805d02ccb9f4b0678d307e822de210.r2.cloudflarestorage.com".into(),
+            bucket: "big-walk".into(),
+            key_id: "0123456789abcdef0123456789abcdef".into(),
+            secret: "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff".into(),
+            region: "auto".into(),
+        }
+    }
+
+    #[test]
+    fn standard_r2_groups_get_a_compact_code() {
+        let g = r2_group();
+        let code = g.encode();
+        assert!(code.starts_with("WR2-"), "{code}");
+        assert!(code.len() <= 104, "{} chars", code.len());
+        assert_eq!(GroupCode::decode(&code).unwrap(), g);
+        // Old-style codes for the same group still decode, to the same group (and same id).
+        let json = format!("WR1-{}", URL_SAFE_NO_PAD.encode(serde_json::to_vec(&g).unwrap()));
+        let old = GroupCode::decode(&json).unwrap();
+        assert_eq!(old, g);
+        assert_eq!(old.id(), GroupCode::decode(&code).unwrap().id());
+    }
+
+    #[test]
+    fn other_storage_falls_back_to_the_full_code() {
+        for g in [
+            GroupCode { endpoint: "https://s3.example.com".into(), ..r2_group() },
+            GroupCode { key_id: "0123456789ABCDEF0123456789ABCDEF".into(), ..r2_group() },
+            GroupCode { region: "us-east-1".into(), ..r2_group() },
+        ] {
+            let code = g.encode();
+            assert!(code.starts_with("WR1-"), "{code}");
+            assert_eq!(GroupCode::decode(&code).unwrap(), g);
+        }
+        assert!(GroupCode::decode("WR2-AAAA").is_err());
+    }
+
+    #[test]
+    fn discord_and_plain_invites_yield_the_compact_code() {
+        let code = r2_group().encode();
+        let msg = discord_invite_message(&code);
+        assert!(msg.contains("](<https://"), "{msg}");
+        assert_eq!(code_from_invite(&msg).as_deref(), Some(code.as_str()));
+        assert_eq!(code_from_invite(&invite_link(&code)).as_deref(), Some(code.as_str()));
+        assert_eq!(code_from_invite(&format!("walkrelay://join#{code}")).as_deref(), Some(code.as_str()));
+        // A bogus code earlier in the text doesn't hide a real one later.
+        assert_eq!(code_from_invite(&format!("WR2-nope and {code}")).as_deref(), Some(code.as_str()));
     }
 
     #[test]

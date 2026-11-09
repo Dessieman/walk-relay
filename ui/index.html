@@ -25,7 +25,7 @@
         <input id="name" maxlength="32" placeholder="e.g. Chris" autocomplete="off" />
       </label>
       <label>Group code
-        <textarea id="code" rows="3" placeholder="Invite link or WR1-… code" spellcheck="false"></textarea>
+        <textarea id="code" rows="3" placeholder="Invite link or group code" spellcheck="false"></textarea>
       </label>
       <button id="join" class="primary">Join and start syncing</button>
       <p id="join-msg" class="msg" role="status"></p>
@@ -53,7 +53,8 @@
         <p>Send this invite to your friends privately (a DM, not a public channel). They click the link and Walk Relay fills in everything.</p>
         <textarea id="created-invite" rows="3" readonly></textarea>
         <div class="row wrap">
-          <button id="copy-created" class="primary">Copy invite</button>
+          <button id="copy-created" class="primary">Copy invite for Discord</button>
+          <button id="copy-created-link">Copy plain link</button>
           <button id="use-created">Use this group for me too</button>
         </div>
         <details class="small"><summary>Show the raw group code</summary>
@@ -111,7 +112,8 @@
       <ul id="deleted" class="list"><li class="muted"><button id="load-deleted">Show deleted journeys</button></li></ul>
       <p class="muted small" id="usage-line"></p>
       <div class="row wrap">
-        <button id="copy-invite" class="primary">Copy invite for a friend</button>
+        <button id="copy-invite" class="primary">Copy invite for Discord</button>
+        <button id="copy-invite-link">Copy plain link</button>
         <button id="show-code">Show group code</button>
         <button id="open-backups">Open local backups</button>
         <button id="leave" class="danger">Leave group</button>

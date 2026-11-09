@@ -83,6 +83,11 @@ $("create").addEventListener("click", (e) =>
   })
 );
 
+$("copy-created-link").addEventListener("click", async () => {
+  const ok = await copyText(await invoke("invite_link", { code: $("created-code").value }), $("created-invite"));
+  setMsg("create-msg", ok ? "Link copied. Paste it into a private message to your friends." : "Select the invite above and copy it.", ok ? "ok" : "");
+});
+
 $("copy-created").addEventListener("click", async () => {
   const ok = await copyText($("created-invite").value, $("created-invite"));
   setMsg("create-msg", ok ? "Invite copied. Paste it into a DM to your friends." : "Select the invite above and copy it.", ok ? "ok" : "");
@@ -121,12 +126,14 @@ invoke("take_pending_invite").then(receiveInvite);
 $("sync-now").addEventListener("click", () => invoke("sync_now"));
 $("open-folder").addEventListener("click", () => invoke("open_save_folder").catch((e) => alert(e)));
 $("open-backups").addEventListener("click", () => invoke("open_backups_folder").catch((e) => alert(e)));
-$("copy-invite").addEventListener("click", async () => {
+async function copyMyInvite(cmd, what) {
   const code = await invoke("get_group_code");
   if (!code) return;
-  const ok = await copyText(await invoke("invite_message", { code }), $("my-code"));
-  setMsg("invite-copied", ok ? "Invite copied. Send it to a friend privately." : "Select the invite above and copy it.", ok ? "ok" : "");
-});
+  const ok = await copyText(await invoke(cmd, { code }), $("my-code"));
+  setMsg("invite-copied", ok ? `${what} copied. Send it to a friend privately.` : "Select the invite above and copy it.", ok ? "ok" : "");
+}
+$("copy-invite").addEventListener("click", () => copyMyInvite("invite_message", "Invite"));
+$("copy-invite-link").addEventListener("click", () => copyMyInvite("invite_link", "Link"));
 $("update-now").addEventListener("click", (e) =>
   busy(e.target, async () => {
     setMsg("update-msg", "Downloading the update…");

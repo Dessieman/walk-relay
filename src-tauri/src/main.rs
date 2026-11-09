@@ -139,11 +139,19 @@ fn get_group_code(shared: St<'_>) -> Option<String> {
 /// The friendly message to send friends, with the clickable invite link.
 #[tauri::command]
 fn invite_message(code: String) -> Result<String, String> {
-    let code = config::code_from_invite(&code).ok_or("That group code doesn't look right")?;
-    Ok(format!(
-        "Join our Big Walk group on Walk Relay: {} (keep this private: it unlocks our shared saves)",
-        config::invite_link(&code)
-    ))
+    Ok(config::discord_invite_message(&compact_code(&code)?))
+}
+
+/// Just the invite link, for apps without Discord-style link text.
+#[tauri::command]
+fn invite_link(code: String) -> Result<String, String> {
+    Ok(config::invite_link(&compact_code(&code)?))
+}
+
+/// Re-encode any code (old or new format) in its shortest form.
+fn compact_code(code: &str) -> Result<String, String> {
+    let code = config::code_from_invite(code).ok_or("That group code doesn't look right")?;
+    Ok(GroupCode::decode(&code).map_err(|e| format!("{e:#}"))?.encode())
 }
 
 /// A group code from an invite link that opened the app, if the UI hasn't taken it yet.
@@ -508,6 +516,7 @@ fn main() {
             create_group_code,
             get_group_code,
             invite_message,
+            invite_link,
             take_pending_invite,
             check_for_update,
             install_update,

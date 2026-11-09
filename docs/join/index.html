@@ -5,7 +5,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="robots" content="noindex" />
   <meta name="referrer" content="no-referrer" />
-  <title>Walk Relay invite</title>
+  <title>You're invited to a Big Walk group</title>
+  <meta name="theme-color" content="#2e7d5b" />
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="Walk Relay" />
+  <meta property="og:title" content="You're invited to a Big Walk group" />
+  <meta property="og:description" content="Walk Relay keeps your group's Big Walk saves in sync, so anyone can host the next walk." />
+  <meta property="og:url" content="https://dessieman.github.io/walk-relay/join/" />
+  <meta property="og:image" content="https://dessieman.github.io/walk-relay/join/card.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
   <!-- The group code lives after the # in this page's address. Browsers never
        send that part to the web server; this page reads it locally and hands
        it to the Walk Relay app. -->
@@ -70,7 +80,7 @@
       // Some chat apps mangle links; a bad "%" escape must not blank the page.
       try { raw = decodeURIComponent(raw); } catch (e) {}
       raw = raw.trim();
-      var m = raw.match(/WR1-[A-Za-z0-9_-]{20,}/);
+      var m = raw.match(/WR[12]-[A-Za-z0-9_-]{20,}/);
       if (!m) {
         document.getElementById("broken").hidden = false;
         return;
