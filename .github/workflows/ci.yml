@@ -26,3 +26,23 @@ jobs:
         run: cargo test -p walkrelay-core
       - name: Desktop app builds
         run: cargo build -p walk-relay
+
+  worker:
+    name: Worker tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: worker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - run: npm test
+      - name: Sync engine through the Worker
+        working-directory: .
+        run: |
+          node worker/test/serve.mjs > /tmp/worker.json &
+          for i in $(seq 1 30); do [ -s /tmp/worker.json ] && break; sleep 1; done
+          WALKRELAY_TEST_WORKER="$(cat /tmp/worker.json)" cargo test -p walkrelay-core --test worker_live -- --test-threads=1

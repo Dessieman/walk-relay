@@ -104,12 +104,26 @@
     <details class="card">
       <summary>Settings &amp; help</summary>
       <p class="muted" id="who"></p>
-      <p><strong>How it works:</strong> just play. When the host closes Big Walk, the journey uploads, and everyone else's copy updates within about a minute, so anyone can host next time. Saves are never touched while Big Walk is open.</p>
+      <p><strong>How it works:</strong> just play. When the host closes Big Walk, the journey uploads, and everyone else's copy updates within a few minutes, so anyone can host next time. Saves are never touched while Big Walk is open.</p>
       <p><strong>Avoid:</strong> two people hosting the <em>same</em> journey at the same time. Walk Relay warns you, and if it happens anyway, it keeps both versions.</p>
       <p class="muted">Save folders watched:</p>
       <ul id="dirs" class="mono"></ul>
       <p class="muted">Deleted journeys</p>
       <ul id="deleted" class="list"><li class="muted"><button id="load-deleted">Show deleted journeys</button></li></ul>
+      <section class="subcard" id="secure-card" hidden>
+        <strong>Secure this group (recommended)</strong>
+        <p class="meta">Right now every invite contains your storage key, so anyone holding an old link could change or delete your saves. Securing the group puts a small Cloudflare Worker in front of the storage: friends join with single-use invites, and you can remove someone at any time. The README walks through deploying the Worker (about 5 minutes).</p>
+        <label>Worker address
+          <input id="secure-url" placeholder="https://walkrelay.<you>.workers.dev" spellcheck="false" autocomplete="off" />
+        </label>
+        <button id="secure-go" class="primary">Secure group</button>
+        <p id="secure-msg" class="msg" role="status"></p>
+      </section>
+      <section class="subcard" id="members-card" hidden>
+        <strong>Members</strong>
+        <p class="meta">Everyone with access to your group. Invites are single-use and expire after 48 hours.</p>
+        <ul id="members" class="list"><li class="muted"><button id="load-members">Show members</button></li></ul>
+      </section>
       <p class="muted small" id="usage-line"></p>
       <div class="row wrap">
         <button id="copy-invite" class="primary">Copy invite for Discord</button>

@@ -12,10 +12,12 @@ pub mod game;
 pub mod paths;
 pub mod schedule;
 pub mod store;
+pub mod worker;
 
-pub use config::{AppConfig, GroupCode};
+pub use config::{AppConfig, GroupCode, Invite, WorkerAuth};
 pub use engine::{Engine, EngineOptions, Event, GroupUsage, Presence, Status, Usage, Version, VersionKind};
 pub use game::GameDetector;
+pub use worker::{InviteInfo, Member, WorkerClient};
 pub use store::{Cond, CountingStore, MemoryStore, ObjInfo, OpCounter, PutOutcome, R2Store, RemoteStore};
 
 /// Milliseconds since the Unix epoch.

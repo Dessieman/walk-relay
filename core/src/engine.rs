@@ -1016,6 +1016,9 @@ impl Engine {
     }
 
     fn prune_history(&self, stem: &str) -> Result<()> {
+        if self.store.prunes_history() {
+            return Ok(());
+        }
         let mut keys: Vec<String> = self
             .store
             .list(&format!("{HISTORY}{}/", hexs(stem)))?

@@ -105,8 +105,13 @@ async function receiveInvite(code) {
   if (!code) return;
   const state = lastState || (await invoke("get_state"));
   if (state.configured) {
-    if ((await invoke("get_group_code")) === code) return; // already in this group
-    if (!confirm("You opened an invite to a different Walk Relay group. Leave your current group and join this one? Your saves stay where they are.")) return;
+    const mine = await invoke("get_group_code");
+    if (mine && code.includes(mine)) return; // already in this group
+    if (state.worker_url && code.includes(state.worker_url.replace(/^https?:\/\//, ""))) {
+      alert("You're already in this group. Invites are single-use, so you can pass this one to a friend who hasn't joined yet.");
+      return;
+    }
+    if (!confirm("Switch this computer to the group in this invite? Your saves stay where they are.")) return;
     await invoke("leave_group");
   }
   await refresh();
@@ -127,11 +132,65 @@ $("sync-now").addEventListener("click", () => invoke("sync_now"));
 $("open-folder").addEventListener("click", () => invoke("open_save_folder").catch((e) => alert(e)));
 $("open-backups").addEventListener("click", () => invoke("open_backups_folder").catch((e) => alert(e)));
 async function copyMyInvite(cmd, what) {
-  const code = await invoke("get_group_code");
-  if (!code) return;
-  const ok = await copyText(await invoke(cmd, { code }), $("my-code"));
-  setMsg("invite-copied", ok ? `${what} copied. Send it to a friend privately.` : "Select the invite above and copy it.", ok ? "ok" : "");
+  try {
+    const text = await invoke(cmd, {}); // secured groups: a fresh single-use invite each time
+    const ok = await copyText(text, $("my-code"));
+    const extra = lastState && lastState.secured ? " It works once and expires in 48 hours." : "";
+    setMsg("invite-copied", ok ? `${what} copied. Send it to one friend privately.${extra}` : "Select the invite above and copy it.", ok ? "ok" : "");
+  } catch (err) {
+    setMsg("invite-copied", String(err), "err");
+  }
 }
+
+// ---------------------------------------------------------------- securing & members
+
+$("secure-go").addEventListener("click", (e) =>
+  busy(e.target, async () => {
+    setMsg("secure-msg", "Connecting to your Worker…");
+    try {
+      await invoke("secure_group", { url: $("secure-url").value });
+      setMsg("secure-msg", "Done! Your group is secured. Now send each friend a new invite, then delete the old R2 API token in Cloudflare.", "ok");
+      refresh();
+    } catch (err) {
+      setMsg("secure-msg", String(err), "err");
+    }
+  })
+);
+
+async function loadMembers() {
+  const list = $("members");
+  try {
+    const { me, members } = await invoke("list_members");
+    list.replaceChildren(
+      ...members.map((m) =>
+        el("li", {},
+          el("div", { class: "grow" },
+            el("div", { class: "title" }, m.name + (m.id === me.id ? " (you)" : "")),
+            el("div", { class: "meta" }, (m.owner ? "Owner · " : "") + `joined ${ago(m.created_at)}`)
+          ),
+          me.owner && m.id !== me.id
+            ? el("button", { class: "danger", onclick: (e) => removeMember(e.target, m) }, "Remove")
+            : null
+        )
+      )
+    );
+  } catch (err) {
+    list.replaceChildren(el("li", { class: "msg err" }, String(err)));
+  }
+}
+
+async function removeMember(btn, m) {
+  if (!confirm(`Remove ${m.name} from the group? Their Walk Relay stops syncing right away. Their own saves stay on their computer.`)) return;
+  await busy(btn, async () => {
+    try {
+      await invoke("remove_member", { id: m.id });
+      loadMembers();
+    } catch (err) {
+      alert(err);
+    }
+  });
+}
+$("load-members").addEventListener("click", loadMembers);
 $("copy-invite").addEventListener("click", () => copyMyInvite("invite_message", "Invite"));
 $("copy-invite-link").addEventListener("click", () => copyMyInvite("invite_link", "Link"));
 $("update-now").addEventListener("click", (e) =>
@@ -263,6 +322,11 @@ function renderHome(state) {
     ...(s.save_dirs.length ? s.save_dirs : state.candidate_dirs.map((d) => d + "  (not found)")).map((d) => el("li", {}, d))
   );
   $("who").textContent = `Signed in as ${state.player_name}.`;
+  $("secure-card").hidden = state.secured;
+  $("members-card").hidden = !state.secured;
+  $("show-code").hidden = state.secured;
+  $("copy-invite").textContent = state.secured ? "Create invite for Discord" : "Copy invite for Discord";
+  $("copy-invite-link").textContent = state.secured ? "Create invite link" : "Copy plain link";
   $("version").textContent = `Walk Relay ${state.app_version}`;
 
   // Updates

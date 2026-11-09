@@ -53,6 +53,64 @@ pub fn discord_invite_message(code: &str) -> String {
     )
 }
 
+/// Discord message for a secured group's single-use invite link.
+pub fn discord_message_for_link(link: &str) -> String {
+    format!("\u{1F97E} [Join our Big Walk group on Walk Relay](<{link}>) (single-use invite, expires in 48 hours)")
+}
+
+/// Something a friend pasted or clicked to join a group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Invite {
+    /// An older invite that carries the bucket key itself (WR1-/WR2- code).
+    Direct(String),
+    /// A secured group's single-use invite: the group's Worker and the invite id.
+    Worker { url: String, id: String },
+}
+
+const INVITE_ID_CHARS: &str = "23456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+fn worker_invite_at(host: &str, id: &str) -> Option<Invite> {
+    let host_ok = host.contains('.')
+        && host.len() <= 253
+        && host.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == ':');
+    let id: String = id.chars().take(8).collect::<String>().to_ascii_uppercase();
+    let id_ok = id.len() == 8 && id.chars().all(|c| INVITE_ID_CHARS.contains(c));
+    (host_ok && id_ok).then(|| Invite::Worker { url: format!("https://{host}"), id })
+}
+
+/// Find an invite in anything a friend might paste or click: a secured group's
+/// `https://<worker>/j/<ID>` link or `walkrelay://join#<worker>/<ID>`, or an
+/// older group code / link / message.
+pub fn parse_invite(text: &str) -> Option<Invite> {
+    // walkrelay://join#host/ID  (also walkrelay://join/#host/ID)
+    if let Some(i) = text.find("walkrelay://join") {
+        let rest = text[i + "walkrelay://join".len()..].trim_start_matches('/').trim_start_matches('#');
+        let token: String = rest.chars().take_while(|c| !c.is_whitespace() && !"<>()[]\"'".contains(*c)).collect();
+        if let Some((host, id)) = token.split_once('/') {
+            if !host.starts_with("WR") {
+                if let Some(inv) = worker_invite_at(host, id) {
+                    return Some(inv);
+                }
+            }
+        }
+    }
+    // https://host/j/ID
+    let mut from = 0;
+    while let Some(i) = text[from..].find("https://") {
+        let rest = &text[from + i + "https://".len()..];
+        let token: String = rest.chars().take_while(|c| !c.is_whitespace() && !"<>()[]\"'".contains(*c)).collect();
+        if let Some((host, path)) = token.split_once('/') {
+            if let Some(id) = path.strip_prefix("j/") {
+                if let Some(inv) = worker_invite_at(host, id) {
+                    return Some(inv);
+                }
+            }
+        }
+        from += i + "https://".len();
+    }
+    code_from_invite(text).map(Invite::Direct)
+}
+
 /// The shareable https invite link for a group code.
 pub fn invite_link(code: &str) -> String {
     format!("{INVITE_PAGE}#{code}")
@@ -157,14 +215,54 @@ impl GroupCode {
 /// Per-machine settings, stored as `config.json` in the data directory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
-    pub group: GroupCode,
+    /// Older groups: the bucket key itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<GroupCode>,
+    /// Secured groups: a personal pass for the group's Worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker: Option<WorkerAuth>,
     pub player_name: String,
     /// Extra save folders to sync in addition to the auto-detected ones.
     #[serde(default)]
     pub extra_save_dirs: Vec<PathBuf>,
 }
 
+/// A personal pass for a secured group's Worker.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerAuth {
+    pub url: String,
+    pub token: String,
+    /// Keeps this computer's sync state when a group is secured (same bucket).
+    #[serde(default)]
+    pub state_id: String,
+}
+
 impl AppConfig {
+    /// The storage this computer syncs with.
+    pub fn store(&self) -> Result<std::sync::Arc<dyn crate::store::RemoteStore>> {
+        if let Some(w) = &self.worker {
+            return Ok(std::sync::Arc::new(crate::worker::WorkerClient::new(&w.url, &w.token)?));
+        }
+        let g = self.group.as_ref().context("This computer isn't in a group yet")?;
+        Ok(std::sync::Arc::new(crate::store::R2Store::new(g)?))
+    }
+
+    /// Stable id for this group's local sync state and usage files.
+    pub fn state_id(&self) -> String {
+        if let Some(w) = &self.worker {
+            if !w.state_id.is_empty() {
+                return w.state_id.clone();
+            }
+            use sha2::{Digest, Sha256};
+            return hex::encode(&Sha256::digest(w.url.as_bytes())[..8]);
+        }
+        self.group.as_ref().map(|g| g.id()).unwrap_or_default()
+    }
+
+    pub fn is_secured(&self) -> bool {
+        self.worker.is_some()
+    }
+
     pub fn path(data_dir: &Path) -> PathBuf {
         data_dir.join("config.json")
     }
@@ -261,6 +359,50 @@ mod tests {
         assert_eq!(code_from_invite(&format!("walkrelay://join#{code}")).as_deref(), Some(code.as_str()));
         // A bogus code earlier in the text doesn't hide a real one later.
         assert_eq!(code_from_invite(&format!("WR2-nope and {code}")).as_deref(), Some(code.as_str()));
+    }
+
+    #[test]
+    fn secured_invites_are_recognised_everywhere() {
+        let want = Invite::Worker { url: "https://walkrelay.chris.workers.dev".into(), id: "7K2Q9XPM".into() };
+        for text in [
+            "https://walkrelay.chris.workers.dev/j/7K2Q9XPM",
+            "https://walkrelay.chris.workers.dev/j/7k2q9xpm",
+            "walkrelay://join#walkrelay.chris.workers.dev/7K2Q9XPM",
+            "walkrelay://join/#walkrelay.chris.workers.dev/7K2Q9XPM",
+            "\u{1F97E} [Join our Big Walk group on Walk Relay](<https://walkrelay.chris.workers.dev/j/7K2Q9XPM>) (single-use)",
+        ] {
+            assert_eq!(parse_invite(text), Some(want.clone()), "{text}");
+        }
+        assert_eq!(parse_invite(&discord_message_for_link("https://walkrelay.chris.workers.dev/j/7K2Q9XPM")), Some(want));
+        // bad ids / hosts
+        assert_eq!(parse_invite("https://walkrelay.chris.workers.dev/j/0OIL1234"), None);
+        assert_eq!(parse_invite("https://localhost/j/7K2Q9XPM"), None);
+        assert_eq!(parse_invite("https://example.com/somewhere"), None);
+        // older invites still parse as direct codes
+        let code = r2_group().encode();
+        assert_eq!(parse_invite(&invite_link(&code)), Some(Invite::Direct(code.clone())));
+        assert_eq!(parse_invite(&format!("walkrelay://join#{code}")), Some(Invite::Direct(code)));
+    }
+
+    #[test]
+    fn old_config_files_still_load() {
+        let old = format!(
+            r#"{{"group":{},"player_name":"Chris","extra_save_dirs":[]}}"#,
+            serde_json::to_string(&r2_group()).unwrap()
+        );
+        let c: AppConfig = serde_json::from_str(&old).unwrap();
+        assert!(!c.is_secured());
+        assert_eq!(c.state_id(), r2_group().id());
+        let secured = AppConfig {
+            group: None,
+            worker: Some(WorkerAuth { url: "https://w.example.dev".into(), token: "t".into(), state_id: "abc".into() }),
+            player_name: "Chris".into(),
+            extra_save_dirs: vec![],
+        };
+        let round: AppConfig = serde_json::from_str(&serde_json::to_string(&secured).unwrap()).unwrap();
+        assert!(round.is_secured());
+        assert_eq!(round.state_id(), "abc");
+        assert!(!serde_json::to_string(&secured).unwrap().contains("\"group\""));
     }
 
     #[test]

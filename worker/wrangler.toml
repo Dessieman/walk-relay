@@ -1,0 +1,9 @@
+# Deployed by .github/workflows/worker.yml (bucket name comes from that workflow's input).
+name = "walkrelay"
+main = "src/index.js"
+compatibility_date = "2025-06-01"
+workers_dev = true
+
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "big-walk"

@@ -43,9 +43,13 @@ pub trait RemoteStore: Send + Sync {
     fn get(&self, key: &str) -> Result<Option<(Vec<u8>, String)>>;
     fn put(&self, key: &str, data: &[u8], cond: Cond) -> Result<PutOutcome>;
     fn delete(&self, key: &str) -> Result<()>;
+    /// True if the server trims old history itself (clients then don't delete it).
+    fn prunes_history(&self) -> bool {
+        false
+    }
 }
 
-fn normalize_etag(e: &str) -> String {
+pub(crate) fn normalize_etag(e: &str) -> String {
     e.trim().trim_start_matches("W/").trim_matches('"').to_string()
 }
 
@@ -100,6 +104,9 @@ impl RemoteStore for CountingStore {
     fn delete(&self, key: &str) -> Result<()> {
         self.counter.class_a.fetch_add(1, Ordering::Relaxed);
         self.inner.delete(key)
+    }
+    fn prunes_history(&self) -> bool {
+        self.inner.prunes_history()
     }
 }
 

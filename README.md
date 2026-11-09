@@ -39,7 +39,7 @@ Download the latest release from this repo's **Releases** page.
    xattr -cr "/Applications/Walk Relay.app"
    ```
 
-When it opens, click the **invite link** a friend sent you (or paste it into the setup screen) and enter **your name**. That's it. Walk Relay now starts with your computer and lives in the system tray (Windows) or the menu bar (Mac). Closing the window keeps it running.
+When it opens, click the **invite link** a friend sent you (or paste it into the setup screen) and enter **your name**. Each invite works once, so ask for your own. That's it. Walk Relay now starts with your computer and lives in the system tray (Windows) or the menu bar (Mac). Closing the window keeps it running.
 
 ## One-time setup (one person does this)
 
@@ -54,12 +54,33 @@ The group needs one small storage bucket. Cloudflare R2's free tier is plenty: a
    - **Access Key ID**
    - **Secret Access Key**
    - the **S3 endpoint**: `https://<your-account-id>.r2.cloudflarestorage.com`
-5. Install Walk Relay. On the setup screen, open **"First one here? Create the group code"**, paste the values plus the bucket name, and click **Test and create code**.
-6. Click **Copy invite** and send it to your friends **privately** (a DM, not a public channel). It's a link they click to join, and it grants access to the bucket. Then click **Use this group for me too** to join yourself.
+5. Install Walk Relay. On the setup screen, open **"First one here? Create the group code"**, paste the values plus the bucket name, and click **Test and create code**. Then click **Use this group for me too**, type your name, and join.
+6. **Secure the group** (next section) before inviting anyone.
 
-Need to invite someone later? Any member can click **Settings & help → Copy invite for a friend**.
+## Secure your group (recommended, about 10 minutes, once)
 
-The invite link opens a small page in this repo ([`docs/join/`](docs/join/index.html), served by GitHub Pages). The group code sits after the `#` in the link, and browsers never send that part to the web server. The page just hands the code to the Walk Relay app, or offers the download if you don't have it yet.
+A plain group code contains your bucket's key. Anyone who gets hold of an invite, even an old one, could change or delete your saves. Securing the group puts a tiny **Cloudflare Worker** (free) in front of the bucket:
+
+- The key stays inside Cloudflare. Each friend gets their **own pass**, stored only on their computer.
+- Invites are **short, single-use and expire after 48 hours**, like `https://walkrelay.<you>.workers.dev/j/7K2Q9XPM`.
+- The owner can **remove** anyone at any time (Settings & help → Members).
+- Only Walk Relay's own save files are allowed, size-capped, and history can't be deleted.
+
+Steps (the owner does this once):
+
+1. **Pick your workers.dev name.** In the Cloudflare dashboard, open **Workers & Pages**. If it's your first time, it asks you to choose a subdomain; any name works.
+2. **Make an API token.** Go to **My Profile → API Tokens → Create Token**, use the **"Edit Cloudflare Workers"** template, set **Account Resources** to your account, and create it. Copy the token.
+3. **Give it to GitHub.** In this repo, open **Settings → Secrets and variables → Actions** and add two secrets:
+   - `CLOUDFLARE_API_TOKEN`: the token from step 2.
+   - `CLOUDFLARE_ACCOUNT_ID`: your account ID, the 32 characters before `.r2.cloudflarestorage.com` in your R2 endpoint.
+4. **Deploy.** Open **Actions → Deploy Worker → Run workflow**, enter your bucket name, and run it. The run's summary shows your Worker address.
+5. **Secure.** In Walk Relay, open **Settings & help → Secure this group**, paste the Worker address, and click **Secure group**. You're now the owner.
+6. **Invite everyone again.** Click **Create invite for Discord** once per friend and DM each their own invite. They click it, type their name, and they're in. Their saves stay where they are; it's the same bucket.
+7. **Delete the old R2 API token** (R2 → Manage API tokens). Every old `WR1-`/`WR2-` code and link stops working, and only the Worker can reach the bucket.
+
+If the deploy fails mentioning R2, edit the API token and add **Account → Workers R2 Storage → Read**.
+
+How invites work: clicking an invite opens a page served by your Worker, which opens Walk Relay with the invite filled in, or offers the download if the friend doesn't have it yet. The invite can be used once; after that the link is useless.
 
 ## Staying in Cloudflare's free tier
 
@@ -106,6 +127,7 @@ Walk Relay checks for a new version when it starts and once a day. When one is o
 core/        sync engine (pure Rust, no GUI): paths, game detection, bundles, R2 client, engine
   tests/     engine.rs: multi-friend scenarios on an in-memory bucket
              s3_live.rs: the real S3 client against a live bucket (set WALKRELAY_TEST_CODE)
+worker/      Cloudflare Worker for secured groups (npm test runs its tests on Miniflare)
 src-tauri/   Tauri v2 tray app (main.rs)
 ui/          the window (plain HTML/CSS/JS)
 ```

@@ -16,7 +16,10 @@ use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_updater::UpdaterExt;
 use walkrelay_core::engine::{self, Status, Version};
-use walkrelay_core::{config, paths, schedule, AppConfig, Engine, EngineOptions, Event, GameDetector, GroupCode, R2Store};
+use walkrelay_core::{
+    config, paths, schedule, AppConfig, Engine, EngineOptions, Event, GameDetector, GroupCode, Invite, Member, R2Store,
+    WorkerAuth, WorkerClient,
+};
 
 /// First update check after launch, then this often.
 const FIRST_UPDATE_CHECK: Duration = Duration::from_secs(30);
@@ -71,6 +74,9 @@ struct UiState {
     candidate_dirs: Vec<String>,
     app_version: String,
     update: UpdateState,
+    /// Secured group: members use personal passes via the group's Worker.
+    secured: bool,
+    worker_url: Option<String>,
 }
 
 #[tauri::command]
@@ -78,11 +84,13 @@ fn get_state(app: AppHandle, shared: St<'_>) -> UiState {
     let cfg = shared.config.lock().unwrap().clone();
     UiState {
         configured: cfg.is_some(),
-        player_name: cfg.map(|c| c.player_name),
+        player_name: cfg.as_ref().map(|c| c.player_name.clone()),
         status: shared.status.lock().unwrap().clone(),
         candidate_dirs: paths::candidate_save_dirs().iter().map(|p| p.display().to_string()).collect(),
         app_version: app.package_info().version.to_string(),
         update: shared.update.lock().unwrap().clone(),
+        secured: cfg.as_ref().is_some_and(|c| c.is_secured()),
+        worker_url: cfg.as_ref().and_then(|c| c.worker.as_ref().map(|w| w.url.clone())),
     }
 }
 
@@ -100,11 +108,31 @@ async fn join_group(app: AppHandle, shared: St<'_>, code: String, name: String) 
         return Err("Pick a name between 1 and 32 characters, so friends know who's hosting.".into());
     }
     // Accept a pasted invite link or message, not only the bare code.
-    let code = config::code_from_invite(&code).unwrap_or(code);
-    let group = GroupCode::decode(&code).map_err(|e| format!("{e:#}"))?;
-    let g2 = group.clone();
-    blocking(move || R2Store::new(&g2)?.check_access()).await.map_err(|e| format!("Couldn't reach your group's storage: {e}"))?;
-    let cfg = AppConfig { group, player_name: name, extra_save_dirs: Vec::new() };
+    let cfg = match config::parse_invite(&code) {
+        Some(Invite::Worker { url, id }) => {
+            let n = name.clone();
+            let u = url.clone();
+            let (token, _) = blocking(move || WorkerClient::redeem(&u, &id, &n)).await?;
+            AppConfig {
+                group: None,
+                worker: Some(WorkerAuth { url, token, state_id: String::new() }),
+                player_name: name,
+                extra_save_dirs: Vec::new(),
+            }
+        }
+        other => {
+            let code = match other {
+                Some(Invite::Direct(c)) => c,
+                _ => code,
+            };
+            let group = GroupCode::decode(&code).map_err(|e| format!("{e:#}"))?;
+            let g2 = group.clone();
+            blocking(move || R2Store::new(&g2)?.check_access())
+                .await
+                .map_err(|e| format!("Couldn't reach your group's storage: {e}"))?;
+            AppConfig { group: Some(group), worker: None, player_name: name, extra_save_dirs: Vec::new() }
+        }
+    };
     cfg.save(&shared.data_dir).map_err(|e| format!("{e:#}"))?;
     *shared.config.lock().unwrap() = Some(cfg);
     if let Err(e) = app.autolaunch().enable() {
@@ -131,21 +159,86 @@ async fn create_group_code(endpoint: String, bucket: String, key_id: String, sec
     Ok(g.encode())
 }
 
+/// The shareable code for an older (unsecured) group. Secured groups have none.
 #[tauri::command]
 fn get_group_code(shared: St<'_>) -> Option<String> {
-    shared.config.lock().unwrap().as_ref().map(|c| c.group.encode())
+    shared.config.lock().unwrap().as_ref().and_then(|c| c.group.as_ref()).map(|g| g.encode())
+}
+
+/// An invite to send: for a secured group, a fresh single-use link from the
+/// Worker; otherwise the group code's link (or the given code's).
+async fn make_invite(shared: &Arc<Shared>, code: Option<String>) -> Result<(String, bool), String> {
+    if let Some(code) = code {
+        return Ok((config::invite_link(&compact_code(&code)?), false));
+    }
+    let cfg = shared.config.lock().unwrap().clone().ok_or("Not set up yet")?;
+    if let Some(w) = cfg.worker {
+        let inv = blocking(move || WorkerClient::new(&w.url, &w.token)?.create_invite()).await?;
+        return Ok((inv.url, true));
+    }
+    let g = cfg.group.ok_or("Not set up yet")?;
+    Ok((config::invite_link(&g.encode()), false))
 }
 
 /// The friendly message to send friends, with the clickable invite link.
 #[tauri::command]
-fn invite_message(code: String) -> Result<String, String> {
-    Ok(config::discord_invite_message(&compact_code(&code)?))
+async fn invite_message(shared: St<'_>, code: Option<String>) -> Result<String, String> {
+    let (link, single_use) = make_invite(shared.inner(), code).await?;
+    Ok(if single_use {
+        config::discord_message_for_link(&link)
+    } else {
+        config::discord_invite_message(&config::code_from_invite(&link).unwrap_or_default())
+    })
 }
 
 /// Just the invite link, for apps without Discord-style link text.
 #[tauri::command]
-fn invite_link(code: String) -> Result<String, String> {
-    Ok(config::invite_link(&compact_code(&code)?))
+async fn invite_link(shared: St<'_>, code: Option<String>) -> Result<String, String> {
+    Ok(make_invite(shared.inner(), code).await?.0)
+}
+
+/// Upgrade an older group: this computer becomes the owner of the group's
+/// Worker, and stops holding the bucket key.
+#[tauri::command]
+async fn secure_group(shared: St<'_>, url: String) -> Result<(), String> {
+    let cfg = shared.config.lock().unwrap().clone().ok_or("Not set up yet")?;
+    let group = cfg.group.clone().ok_or("This group is already secured.")?;
+    let url = walkrelay_core::worker::normalize_url(&url).map_err(|e| format!("{e:#}"))?;
+    let (u, n, g) = (url.clone(), cfg.player_name.clone(), group.clone());
+    let (token, _) = blocking(move || WorkerClient::setup(&u, &R2Store::new(&g)?, &n)).await?;
+    let secured = AppConfig {
+        group: None,
+        worker: Some(WorkerAuth { url, token, state_id: group.id() }),
+        ..cfg
+    };
+    secured.save(&shared.data_dir).map_err(|e| format!("{e:#}"))?;
+    *shared.config.lock().unwrap() = Some(secured);
+    let _ = shared.wake.send(Wake::Reload);
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct MembersView {
+    me: Member,
+    members: Vec<Member>,
+}
+
+fn worker_client(shared: &Arc<Shared>) -> Result<WorkerClient, String> {
+    let cfg = shared.config.lock().unwrap().clone().ok_or("Not set up yet")?;
+    let w = cfg.worker.ok_or("Members are only available in a secured group.")?;
+    WorkerClient::new(&w.url, &w.token).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn list_members(shared: St<'_>) -> Result<MembersView, String> {
+    let c = worker_client(shared.inner())?;
+    blocking(move || Ok(MembersView { me: c.me()?, members: c.members()? })).await
+}
+
+#[tauri::command]
+async fn remove_member(shared: St<'_>, id: String) -> Result<(), String> {
+    let c = worker_client(shared.inner())?;
+    blocking(move || c.remove_member(&id)).await
 }
 
 /// Re-encode any code (old or new format) in its shortest form.
@@ -199,8 +292,8 @@ async fn install_update(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 async fn list_versions(shared: St<'_>, stem: String) -> Result<Vec<Version>, String> {
-    let group = shared.config.lock().unwrap().as_ref().map(|c| c.group.clone()).ok_or("Not set up yet")?;
-    blocking(move || engine::list_versions(&R2Store::new(&group)?, &stem)).await
+    let cfg = shared.config.lock().unwrap().clone().ok_or("Not set up yet")?;
+    blocking(move || engine::list_versions(cfg.store()?.as_ref(), &stem)).await
 }
 
 #[derive(Serialize)]
@@ -211,19 +304,16 @@ struct DeletedJourney {
 
 #[tauri::command]
 async fn list_deleted(shared: St<'_>) -> Result<Vec<DeletedJourney>, String> {
-    let group = shared.config.lock().unwrap().as_ref().map(|c| c.group.clone()).ok_or("Not set up yet")?;
-    let list = blocking(move || engine::list_deleted(&R2Store::new(&group)?)).await?;
+    let cfg = shared.config.lock().unwrap().clone().ok_or("Not set up yet")?;
+    let list = blocking(move || engine::list_deleted(cfg.store()?.as_ref())).await?;
     Ok(list.into_iter().map(|(stem, name)| DeletedJourney { stem, name }).collect())
 }
 
 #[tauri::command]
 async fn restore_version(shared: St<'_>, stem: String, key: String) -> Result<(), String> {
-    let (group, player) = {
-        let c = shared.config.lock().unwrap();
-        let c = c.as_ref().ok_or("Not set up yet")?;
-        (c.group.clone(), c.player_name.clone())
-    };
-    blocking(move || engine::restore_version(&R2Store::new(&group)?, &stem, &key, &player)).await?;
+    let cfg = shared.config.lock().unwrap().clone().ok_or("Not set up yet")?;
+    let player = cfg.player_name.clone();
+    blocking(move || engine::restore_version(cfg.store()?.as_ref(), &stem, &key, &player)).await?;
     let _ = shared.wake.send(Wake::SyncNow);
     Ok(())
 }
@@ -347,9 +437,9 @@ fn worker(app: AppHandle, shared: Arc<Shared>, rx: Receiver<Wake>) {
             if let Some(cfg) = shared.config.lock().unwrap().clone() {
                 let mut opts = EngineOptions::new(cfg.player_name.clone(), shared.data_dir.clone());
                 opts.extra_save_dirs = cfg.extra_save_dirs.clone();
-                opts.state_file = format!("state-{}.json", cfg.group.id());
-                opts.usage_file = format!("usage-{}.json", cfg.group.id());
-                match R2Store::new(&cfg.group).and_then(|s| Engine::new(Arc::new(s), opts)) {
+                opts.state_file = format!("state-{}.json", cfg.state_id());
+                opts.usage_file = format!("usage-{}.json", cfg.state_id());
+                match cfg.store().and_then(|s| Engine::new(s, opts)) {
                     Ok(e) => engine = Some(e),
                     Err(e) => shared.status.lock().unwrap().last_error = Some(format!("{e:#}")),
                 }
@@ -440,10 +530,10 @@ fn show_main(app: &AppHandle) {
 /// Handle an invite link (from a click, or from the command line).
 fn handle_links<I: IntoIterator<Item = String>>(app: &AppHandle, links: I) {
     for link in links {
-        if let Some(code) = config::code_from_invite(&link) {
-            *app.state::<Arc<Shared>>().pending_invite.lock().unwrap() = Some(code.clone());
+        if config::parse_invite(&link).is_some() {
+            *app.state::<Arc<Shared>>().pending_invite.lock().unwrap() = Some(link.clone());
             show_main(app);
-            let _ = app.emit("invite", code);
+            let _ = app.emit("invite", link);
         }
     }
 }
@@ -517,6 +607,9 @@ fn main() {
             get_group_code,
             invite_message,
             invite_link,
+            secure_group,
+            list_members,
+            remove_member,
             take_pending_invite,
             check_for_update,
             install_update,
