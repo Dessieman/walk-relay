@@ -268,9 +268,9 @@ function renderHome(state) {
     head.className = "headline";
     sub.textContent = "";
   } else if (s.save_dirs.length === 0) {
-    head.textContent = "Big Walk save folder not found";
+    head.textContent = "Big Walk's folder wasn't found";
     head.className = "headline warn";
-    sub.textContent = "Launch Big Walk once so it creates its save folder.";
+    sub.textContent = "Has Big Walk been opened on this computer? Walk Relay looked in: " + state.candidate_dirs.join("  ·  ");
   } else if (s.journeys.every((j) => j.in_sync)) {
     head.textContent = "✓ All journeys in sync";
     head.className = "headline ok";

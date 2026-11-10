@@ -506,3 +506,25 @@ fn launch_warning_uses_fresh_presence_even_after_an_idle_gap() {
     assert_eq!(ev.iter().filter(|e| **e == warn).count(), 1, "{ev:?}");
     assert!(!ev.iter().any(|e| matches!(e, Event::PeerStartedHosting { .. })), "{ev:?}");
 }
+
+#[test]
+fn a_friend_who_never_hosted_still_gets_every_journey() {
+    let store = MemoryStore::new();
+    let mut chris = Friend::new("Chris", &store);
+    chris.play(STEM, "v1");
+    chris.sync();
+
+    // Craig has the game's folder but Big Walk never created save_games (never hosted).
+    let tmp = TempDir::new().unwrap();
+    let game = tmp.path().join("House House").join("Big Walk");
+    std::fs::create_dir_all(&game).unwrap();
+    let saves = game.join("user_data").join("save_games");
+    let mut opts = EngineOptions::new("Craig", tmp.path().join("data"));
+    opts.save_dirs_override = Some(vec![saves.clone()]);
+    opts.stable_ms = 0;
+    let mut craig = Engine::new(Arc::new(store.clone()), opts).unwrap();
+    let ev = craig.sync_once(false).unwrap();
+    assert!(ev.iter().any(|e| matches!(e, Event::Downloaded { .. })), "{ev:?}");
+    assert_eq!(std::fs::read_to_string(saves.join(format!("{STEM}.sav"))).unwrap(), "v1");
+    assert!(craig.status().journeys.iter().all(|j| j.in_sync));
+}

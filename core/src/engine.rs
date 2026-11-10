@@ -484,8 +484,8 @@ impl Engine {
 
     pub fn save_dirs(&self) -> Vec<PathBuf> {
         match &self.opts.save_dirs_override {
-            Some(v) => v.iter().filter(|p| p.is_dir()).cloned().collect(),
-            None => paths::existing_save_dirs(&self.opts.extra_save_dirs),
+            Some(v) => paths::ensure_in(v),
+            None => paths::save_dirs_to_sync(&self.opts.extra_save_dirs),
         }
     }
 

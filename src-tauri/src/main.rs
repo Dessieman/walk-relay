@@ -326,7 +326,7 @@ fn sync_now(shared: St<'_>) {
 #[tauri::command]
 fn open_save_folder(app: AppHandle, shared: St<'_>) -> Result<(), String> {
     let extra = shared.config.lock().unwrap().as_ref().map(|c| c.extra_save_dirs.clone()).unwrap_or_default();
-    let dir = paths::existing_save_dirs(&extra)
+    let dir = paths::save_dirs_to_sync(&extra)
         .into_iter()
         .next()
         .ok_or("Big Walk's save folder doesn't exist yet. Launch Big Walk once, then try again.")?;

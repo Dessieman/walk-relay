@@ -4882,7 +4882,7 @@ dependencies = [
 
 [[package]]
 name = "walk-relay"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "log",
@@ -4911,7 +4911,7 @@ dependencies = [
 
 [[package]]
 name = "walkrelay-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

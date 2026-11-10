@@ -70,6 +70,41 @@ pub fn existing_save_dirs(extra: &[PathBuf]) -> Vec<PathBuf> {
     out
 }
 
+/// The save folders to sync with, creating `user_data/save_games` where needed.
+///
+/// Big Walk only creates `save_games` the first time someone hosts on that
+/// computer, so a friend who has only joined as a guest has the game's folder
+/// but no save folder yet. As long as the game's own folder exists, we create
+/// the save folder so journeys can be downloaded (and hosted) there.
+pub fn save_dirs_to_sync(extra: &[PathBuf]) -> Vec<PathBuf> {
+    let all: Vec<PathBuf> = candidate_save_dirs().into_iter().chain(extra.iter().cloned()).collect();
+    ensure_in(&all)
+}
+
+/// For each folder: use it if it exists; otherwise create it if the game's
+/// folder (two levels up: `.../Big Walk` above `user_data/save_games`) exists.
+/// Never creates anything when the game's folder is missing.
+pub fn ensure_in(dirs: &[PathBuf]) -> Vec<PathBuf> {
+    let mut seen = Vec::<PathBuf>::new();
+    let mut out = Vec::new();
+    for dir in dirs {
+        if !dir.is_dir() {
+            let game_dir = dir.parent().and_then(|p| p.parent());
+            if !game_dir.is_some_and(|g| g.is_dir()) || std::fs::create_dir_all(dir).is_err() {
+                continue;
+            }
+            log::info!("created Big Walk save folder {}", dir.display());
+        }
+        let canon = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+        if seen.contains(&canon) {
+            continue;
+        }
+        seen.push(canon);
+        out.push(dir.clone());
+    }
+    out
+}
+
 /// What a journey file is called, if `file_name` is one.
 /// Returns the journey stem (`save_<walk name>_<id>`) for `.sav` and `.sav.bak` files.
 pub fn journey_stem(file_name: &str) -> Option<&str> {
@@ -106,6 +141,24 @@ mod tests {
         assert_eq!(display_name("save_a nice view_52057433e2c14fbb"), "a nice view");
         assert_eq!(display_name("save_under_score walk_401fe41c4c9041c6"), "under_score walk");
         assert_eq!(display_name("weird"), "weird");
+    }
+
+    #[test]
+    fn save_folder_is_created_only_when_the_game_folder_exists() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let game = tmp.path().join("House House").join("Big Walk");
+        std::fs::create_dir_all(&game).unwrap(); // guest: game folder, no saves yet
+        let saves = game.join("user_data").join("save_games");
+        let other = tmp.path().join("unity.House House.Big Walk").join("user_data").join("save_games");
+
+        let got = ensure_in(&[saves.clone(), other.clone(), saves.clone()]);
+        assert_eq!(got, vec![saves.clone()], "created once, deduplicated");
+        assert!(saves.is_dir());
+        assert!(!other.exists() && !other.parent().unwrap().parent().unwrap().exists(), "no stray folders");
+
+        // Already existing: returned as is.
+        assert_eq!(ensure_in(&[saves.clone()]), vec![saves]);
+        assert!(ensure_in(&[other]).is_empty());
     }
 
     #[test]
